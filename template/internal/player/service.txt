@@ -1,0 +1,296 @@
+package player
+
+import (
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/middlewares"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	"{{PROJECT_NAME}}/pkg/utls"
+	"encoding/json"
+	"fmt"
+	"strconv"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2/decimal"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type playerCreator interface {
+	Show(playerShowRequest PlayerShowRequest) (*PlayerResponseWithBalance, *responses.ErrorResponse)
+	ShowOne(player_uuid uuid.UUID) (*PlayerResponse, *responses.ErrorResponse)
+	Create(playerReq PlayerNewRequest) (*PlayerResponse, *responses.ErrorResponse)
+	Update(player_uuid uuid.UUID, usreq PlayerUpdateRequest) (*PlayerResponse, *responses.ErrorResponse)
+	Delete(player_uuid uuid.UUID) (*UpdateDeleteResponse, *responses.ErrorResponse)
+	GetPlayerFormCreate() (*PlayerFormCreateResponse, *responses.ErrorResponse)
+	GetPlayerFormUpdate(player_uuid uuid.UUID) (*PlayerFormUpdateResponse, *responses.ErrorResponse)
+	Update_Password(player_uuid uuid.UUID, usreq PlayerUpdatePasswordRequest) (*PlayerUpdatePasswordReponse, *responses.ErrorResponse)
+	UpdatePlayerBetLimit(player_bet_limit_uuid uuid.UUID, player_bet_limit_update_req UpdateBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse)
+	SetPlayerBetLimit(set_bet_limit_req SetBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse)
+	UpdatePlayerStatus(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*PlayerResponse, *responses.ErrorResponse)
+	UpdatePlayerStatusAndBet(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*PlayerResponse, *responses.ErrorResponse)
+}
+
+type PlayerService struct {
+	userCtx    *types.UserContext
+	dbPool     *pool.ConnectionPool
+	playerRepo PlayerRepo
+}
+
+func NewPlayerService(u *types.UserContext, db *pool.ConnectionPool) *PlayerService {
+	r := NewPlayerRepoImpl(u, db)
+	return &PlayerService{
+		userCtx:    u,
+		dbPool:     db,
+		playerRepo: r,
+	}
+}
+
+func (u *PlayerService) checkPermission(function_id string) *responses.ErrorResponse {
+	if !middlewares.HasPermission(u.userCtx.RoleId, "player", function_id, u.dbPool) {
+		custom_log.NewCustomLog("permission_denied", "Permission denied", "error")
+		err_msg := &responses.ErrorResponse{}
+		return err_msg.NewErrorResponse("permission_denied", fmt.Errorf("permission denied"))
+	}
+	return nil
+}
+
+func (u *PlayerService) Show(playerShowRequest PlayerShowRequest) (*PlayerResponseWithBalance, *responses.ErrorResponse) {
+	if err := u.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.Show(playerShowRequest)
+	if err == nil {
+		return success, nil
+	} else {
+		return nil, err
+	}
+}
+
+func (u *PlayerService) ShowOne(id uuid.UUID) (*PlayerResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.ShowOne(id)
+	if err == nil {
+		return success, nil
+	} else {
+		return nil, err
+	}
+}
+
+func (u *PlayerService) Create(usreq PlayerNewRequest) (*PlayerResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("2"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.Create(usreq)
+	return success, err
+}
+
+func (u *PlayerService) Update(id uuid.UUID, usreq PlayerUpdateRequest) (*PlayerResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.Update(id, usreq)
+	if success != nil {
+		args := []interface{}{success.Players[0].ID}
+		if err := tarantool_utls.InvokeBroadcast("broadcast_player_notification", args, u.dbPool); err != nil {
+			fmt.Println("Broadcast Error : ", err)
+		}
+	}
+	return success, err
+}
+
+func (u *PlayerService) Delete(player_uuid uuid.UUID) (*UpdateDeleteResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("4"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.Delete(player_uuid)
+	return success, err
+}
+
+func (u *PlayerService) GetPlayerFormCreate() (*PlayerFormCreateResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("2"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.GetPlayerFormCreate()
+	return success, err
+}
+
+func (u *PlayerService) GetPlayerFormUpdate(player_uuid uuid.UUID) (*PlayerFormUpdateResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.GetPlayerFormUpdate(player_uuid)
+	return success, err
+}
+
+func (u *PlayerService) Update_Password(player_uuid uuid.UUID, usreq PlayerUpdatePasswordRequest) (*PlayerUpdatePasswordReponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.Update_Password(player_uuid, usreq)
+	return success, err
+}
+
+func (u *PlayerService) UpdatePlayerBetLimit(player_bet_limit_uuid uuid.UUID, player_bet_limit_update_req UpdateBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.UpdatePlayerBetLimit(player_bet_limit_uuid, player_bet_limit_update_req)
+	return success, err
+}
+
+func (u *PlayerService) SetPlayerBetLimit(set_bet_limit_req SetBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.SetPlayerBetLimit(set_bet_limit_req)
+	return success, err
+}
+
+func (u *PlayerService) UpdatePlayerStatus(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*PlayerResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.UpdatePlayerStatus(player_uuid, psreq)
+	if success != nil {
+		args := []interface{}{success.PlayerResponse.Players[0].ID}
+		if err := tarantool_utls.InvokeBroadcast("broadcast_player_notification", args, u.dbPool); err != nil {
+			fmt.Println("Broadcast Error : ", err)
+		}
+
+		//Add Audit
+		var audit_des = fmt.Sprintf("Updating status id of player `%s` has been sucessful", player_uuid)
+		_, err := utls.AddUserAuditLog(
+			int(*success.PlayerResponse.Players[0].UpdatedBy), "Update player", audit_des, 1, u.userCtx.UserAgent,
+			u.userCtx.UserName, u.userCtx.Ip, int(*success.PlayerResponse.Players[0].UpdatedBy), u.dbPool)
+		if err != nil {
+			custom_log.NewCustomLog("player_update_failed", err.Error(), "warn")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot add audit"))
+		}
+
+		//Add notification
+		var notificationSubject = "Your Account Has Changed"
+		var notificationDesc = fmt.Sprintf(
+			"Your account is now '%s'. Set by admin '%s'.",
+			success.StatusName, u.userCtx.UserName,
+		)
+		err = utls.AddNotification(
+			"players_notifications_space", "player", int(success.PlayerResponse.Players[0].ID),
+			"Account Change", notificationSubject, notificationDesc,
+			1, 7, int(*success.PlayerResponse.Players[0].UpdatedBy), u.dbPool,
+		)
+
+		if err != nil {
+			custom_log.NewCustomLog("player_update_failed", err.Error(), "warn")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot add notification"))
+		}
+	}
+	return &success.PlayerResponse, err
+}
+
+func addBetOutstandingToMini(userName string, betAmount decimal.Decimal, roundNo string, currencyID int, dbPool *pool.ConnectionPool) {
+	platform, err := tarantool_utls.GetPlatformById(1, dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("bet_create_failed", err.Error(), "error")
+		return
+	}
+
+	betAmountStr := betAmount.String()
+	betAmountFloat, _ := strconv.ParseFloat(betAmountStr, 64)
+
+	bodyParams, errs := json.Marshal(AddBalanceOutstanding{
+		MemberLoginID: userName,
+		GameID:        5,
+		RoundNo:       roundNo,
+		CurrencyID:    currencyID,
+		Balance:       betAmountFloat,
+		Commission:    0,
+		IsAutoClear:   false,
+		AutoClearIn:   1,
+	})
+	if errs != nil {
+		custom_log.NewCustomLog("bet_create_failed", errs.Error(), "error")
+		return
+	}
+
+	url := fmt.Sprintf("%s/bets/add_cockfight_balance_outstanding", platform.PlatformHost)
+	agent := fiber.Post(url)
+	agent.ContentType("application/json")
+	agent.Request().Header.Add("Authorization", "Bearer "+platform.PlatformToken)
+	agent.Body(bodyParams)
+
+	_, resBody, error := agent.Bytes()
+	if len(error) > 0 {
+		custom_log.NewCustomLog("bet_create_failed", error[0].Error(), "error")
+		return
+	}
+
+	var addBalanceOutstandingResponse AddBalanceOutstandingResponse
+	err_shal := json.Unmarshal(resBody, &addBalanceOutstandingResponse)
+	if err_shal != nil {
+		custom_log.NewCustomLog("bet_create_failed", err_shal.Error(), "error")
+		return
+	}
+
+	if !addBalanceOutstandingResponse.Success {
+		custom_log.NewCustomLog("bet_create_failed", "error")
+		return
+	}
+}
+
+func (u *PlayerService) UpdatePlayerStatusAndBet(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*PlayerResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.playerRepo.UpdatePlayerStatusAndBet(player_uuid, psreq)
+	if success != nil {
+		args := []interface{}{success.PlayerResponse.Players[0].ID}
+		if err := tarantool_utls.InvokeBroadcast("broadcast_player_notification", args, u.dbPool); err != nil {
+			fmt.Println("Broadcast Error : ", err)
+		}
+
+		if len(success.BetResponse.Bets) > 0 {
+			for _, bet := range success.BetResponse.Bets {
+				betAmountStr := bet.BetAmount.String()
+				negativeBetAmount, _ := decimal.MakeDecimalFromString("-" + betAmountStr)
+
+				addBetOutstandingToMini(bet.UserName, negativeBetAmount, bet.RoundNo, int(bet.CurrencyID), u.dbPool)
+			}
+		}
+
+		//Add Audit
+		var audit_des = fmt.Sprintf("Updating status id of player `%s` has been sucessful", player_uuid)
+		_, err := utls.AddUserAuditLog(
+			int(*success.PlayerResponse.Players[0].UpdatedBy), "Update player", audit_des, 1, u.userCtx.UserAgent,
+			u.userCtx.UserName, u.userCtx.Ip, int(*success.PlayerResponse.Players[0].UpdatedBy), u.dbPool)
+		if err != nil {
+			custom_log.NewCustomLog("player_update_failed", err.Error(), "warn")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot add audit"))
+		}
+
+		//Add notification
+		var notificationSubject = "Your Account Has Changed"
+		var notificationDesc = fmt.Sprintf(
+			"Your account is now '%s'. Set by admin '%s'.",
+			success.StatusName, u.userCtx.UserName,
+		)
+		err = utls.AddNotification(
+			"players_notifications_space", "player", int(success.PlayerResponse.Players[0].ID),
+			"Account Change", notificationSubject, notificationDesc,
+			1, 7, int(*success.PlayerResponse.Players[0].UpdatedBy), u.dbPool,
+		)
+
+		if err != nil {
+			custom_log.NewCustomLog("player_update_failed", err.Error(), "warn")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot add notification"))
+		}
+	}
+	return &success.PlayerResponse, err
+}

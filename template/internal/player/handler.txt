@@ -1,0 +1,484 @@
+package player
+
+import (
+	"{{PROJECT_NAME}}/pkg/constants"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	types "{{PROJECT_NAME}}/pkg/share"
+	"{{PROJECT_NAME}}/pkg/utls"
+	"net/http"
+
+	response "{{PROJECT_NAME}}/pkg/http/response"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// PlayerHandler struct
+type PlayerHandler struct {
+	db            *pool.ConnectionPool
+	playerService func(*fiber.Ctx) playerCreator
+}
+
+func NewHandler(db *pool.ConnectionPool) *PlayerHandler {
+	return &PlayerHandler{
+		db: db,
+		playerService: func(c *fiber.Ctx) playerCreator {
+			userContext := c.Locals("UserContext")
+			var uCtx types.UserContext
+			// Convert map to UserContext struct
+			if contextMap, ok := userContext.(types.UserContext); ok {
+				uCtx = contextMap
+			} else {
+				custom_log.NewCustomLog("user_context_failed", "Failed to cast UserContext to map[string]interface{}", "warn")
+				uCtx = types.UserContext{}
+			}
+
+			// Pass uCtx to NewAuthService if needed
+			return NewPlayerService(&uCtx, db)
+		},
+	}
+}
+
+func (h *PlayerHandler) Show(c *fiber.Ctx) error {
+	var playerRequest PlayerShowRequest
+
+	//Bind and validate
+	v := utls.NewValidator()
+	if err := playerRequest.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("player_show_failed", nil, c),
+				-1000,
+				err,
+			),
+		)
+	}
+
+	// Debugging output to see if the struct is populated correctly
+
+	as := h.playerService(c)
+	players, err := as.Show(playerRequest)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerShowFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponseWithPaging(
+			utls.Translate("player_show_success", nil, c),
+			constants.PlayerShowSuccess,
+			players,
+			playerRequest.PageOptions.Page,
+			playerRequest.PageOptions.Perpage,
+			players.Total,
+		))
+	}
+}
+
+func (h *PlayerHandler) ShowOne(c *fiber.Ctx) error {
+
+	idStr := c.Params("id", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	id, err_uuid := uuid.Parse(idStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_show_failed", nil, c),
+			constants.PlayerShowOneFailed,
+			err_uuid,
+		))
+	}
+
+	as := h.playerService(c)
+	players, err := as.ShowOne(id)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerShowOneFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_show_success", nil, c),
+			constants.PlayerShowOneSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) Create(c *fiber.Ctx) error {
+	var playerNewRequest PlayerNewRequest
+
+	//Bind and validate
+	v := utls.NewValidator()
+	if err := playerNewRequest.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("player_create_failed", nil, c),
+				constants.PlayerCreateFailed,
+				err,
+			),
+		)
+	}
+
+	as := h.playerService(c)
+	players, err := as.Create(playerNewRequest)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerCreateFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_create_success", nil, c),
+			constants.PlayerCreateSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) Update(c *fiber.Ctx) error {
+	// Extract the "id" parameter from the URL
+	idStr := c.Params("id", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	id, err_uuid := uuid.Parse(idStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_update_failed", nil, c),
+			constants.PlayerUpdateFailed,
+			err_uuid,
+		))
+	}
+
+	var playerUpdateRequest PlayerUpdateRequest
+
+	//Bind and validate
+	v := utls.NewValidator()
+	if err := playerUpdateRequest.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("player_update_failed", nil, c),
+				constants.PlayerUpdateFailed,
+				err,
+			),
+		)
+	}
+
+	as := h.playerService(c)
+	players, err := as.Update(id, playerUpdateRequest)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerUpdateFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_update_success", nil, c),
+			constants.PlayerUpdateSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) Delete(c *fiber.Ctx) error {
+	// Extract the "id" parameter from the URL
+	idStr := c.Params("id", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	player_uuid, err_uuid := uuid.Parse(idStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_delete_failed", nil, c),
+			constants.PlayerDeleteFailed,
+			err_uuid,
+		))
+	}
+
+	as := h.playerService(c)
+	players, err := as.Delete(player_uuid)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerDeleteFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_delete_success", nil, c),
+			constants.PlayerDeleteSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) GetPlayerFormCreate(c *fiber.Ctx) error {
+
+	as := h.playerService(c)
+	players, err := as.GetPlayerFormCreate()
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerGetPlayerFormCreateFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_create_form_success", nil, c),
+			constants.PlayerGetPlayerFormCreateSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) GetPlayerFormUpdate(c *fiber.Ctx) error {
+	// Extract the "id" parameter from the URL
+	idStr := c.Params("id", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	player_uuid, err_uuid := uuid.Parse(idStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_update_form_failed", nil, c),
+			constants.PlayerGetPlayerFormUpdateFailed,
+			err_uuid,
+		))
+	}
+	as := h.playerService(c)
+	players, err := as.GetPlayerFormUpdate(player_uuid)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerGetPlayerFormUpdateFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_update_form_success", nil, c),
+			constants.PlayerGetPlayerFormUpdateSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) Update_Password(c *fiber.Ctx) error {
+	// Extract the "id" parameter from the URL
+	idStr := c.Params("id", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	id, err_uuid := uuid.Parse(idStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_update_password_failed", nil, c),
+			constants.PlayerUpdate_PasswordFailed,
+			err_uuid,
+		))
+	}
+	var playerUpdatePasswordRequest PlayerUpdatePasswordRequest
+
+	//Bind and validate
+	v := utls.NewValidator()
+	if err := playerUpdatePasswordRequest.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("player_update_password_failed", nil, c),
+				constants.PlayerUpdate_PasswordFailed,
+				err,
+			),
+		)
+	}
+
+	as := h.playerService(c)
+	players, err := as.Update_Password(id, playerUpdatePasswordRequest)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerUpdate_PasswordFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_update_password_success", nil, c),
+			constants.PlayerUpdate_PasswordSuccess,
+			players,
+		))
+	}
+}
+
+func (u *PlayerHandler) UpdatePlayerBetLimit(c *fiber.Ctx) error {
+	uuid_str := c.Params("uuid", "")
+	uuid, err_uuid := uuid.Parse(uuid_str)
+	if err_uuid != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate("player_bet_limit_update_failed", nil, c),
+			-9200,
+			err_uuid,
+		))
+	}
+
+	var player_bet_limit_update_request UpdateBetLimitRequest
+	v := utls.NewValidator()
+
+	if err := player_bet_limit_update_request.bind(c, v); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate("player_bet_limit_update_failed", nil, c),
+			-9200,
+			err,
+		))
+	}
+
+	resp, err := u.playerService(c).UpdatePlayerBetLimit(uuid, player_bet_limit_update_request)
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			-9200,
+			err.Err,
+		))
+	}
+
+	return c.Status(http.StatusOK).JSON(
+		response.NewResponse(
+			utls.Translate("player_bet_limit_update_success", nil, c),
+			9200,
+			resp,
+		),
+	)
+}
+
+func (u *PlayerHandler) SetPlayerBetLimit(c *fiber.Ctx) error {
+	var set_player_bet_limit_req SetBetLimitRequest
+	v := utls.NewValidator()
+
+	if err := set_player_bet_limit_req.bind(c, v); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(
+			response.NewResponseError(
+				utls.Translate("player_bet_limit_set_failed", nil, c),
+				-9300,
+				err,
+			),
+		)
+	}
+
+	resp, err := u.playerService(c).SetPlayerBetLimit(set_player_bet_limit_req)
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(
+			response.NewResponseError(
+				utls.Translate(err.MessageID, nil, c),
+				-9300,
+				err.Err,
+			),
+		)
+	}
+
+	return c.Status(http.StatusOK).JSON(
+		response.NewResponse(
+			utls.Translate("player_bet_limit_set_success", nil, c),
+			9300,
+			resp,
+		),
+	)
+}
+
+func (h *PlayerHandler) UpdatePlayerStatus(c *fiber.Ctx) error {
+	// Extract the "id" parameter from the URL
+	uuidStr := c.Params("uuid", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	uuid, err_uuid := uuid.Parse(uuidStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_update_failed", nil, c),
+			constants.PlayerUpdateFailed,
+			err_uuid,
+		))
+	}
+
+	var playerStatusUpdateRequest PlayerStatusUpdateRequest
+
+	//Bind and validate
+	v := utls.NewValidator()
+	if err := playerStatusUpdateRequest.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("player_update_failed", nil, c),
+				constants.PlayerUpdateFailed,
+				err,
+			),
+		)
+	}
+
+	as := h.playerService(c)
+	players, err := as.UpdatePlayerStatus(uuid, playerStatusUpdateRequest)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerUpdateFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_update_success", nil, c),
+			constants.PlayerUpdateSuccess,
+			players,
+		))
+	}
+}
+
+func (h *PlayerHandler) UpdatePlayerStatusAndBet(c *fiber.Ctx) error {
+	// Extract the "id" parameter from the URL
+	uuidStr := c.Params("uuid", "")
+
+	// Parse the UUID string (you can use google/uuid or another library that supports UUID v7)
+	uuid, err_uuid := uuid.Parse(uuidStr)
+	if err_uuid != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			utls.Translate("player_update_failed", nil, c),
+			constants.PlayerUpdateFailed,
+			err_uuid,
+		))
+	}
+
+	var playerStatusUpdateRequest PlayerStatusUpdateRequest
+
+	//Bind and validate
+	v := utls.NewValidator()
+	if err := playerStatusUpdateRequest.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("player_update_failed", nil, c),
+				constants.PlayerUpdateFailed,
+				err,
+			),
+		)
+	}
+
+	as := h.playerService(c)
+	players, err := as.UpdatePlayerStatusAndBet(uuid, playerStatusUpdateRequest)
+
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.PlayerUpdateFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("player_update_success", nil, c),
+			constants.PlayerUpdateSuccess,
+			players,
+		))
+	}
+}

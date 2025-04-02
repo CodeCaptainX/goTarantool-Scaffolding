@@ -1,0 +1,5 @@
+package constants
+
+const (
+	WebSocketGetLoginSessionSuccess = 17000
+)

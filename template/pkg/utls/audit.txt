@@ -1,0 +1,166 @@
+package utls
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+func AddRoundLog(round_id int, log_context string, log_desc string, log_type int, user_name string, by_id int, dbPool *pool.ConnectionPool) (*bool, error) {
+	//prepare sql
+	var sql = `INSERT INTO rounds_logs_space (
+				"round_log_uuid", "round_id", "round_log_context", "round_log_desc", "log_type_id",
+				"operator", "status_id", "order", "created_by", "created_at"
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+			)`
+
+	log_uuid, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return nil, err
+	}
+
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		log_uuid,
+		round_id,
+		log_context,
+		log_desc,
+		log_type,
+		user_name,
+		1,
+		1,
+		by_id,
+		now,
+	})
+
+	//execute sql
+	_, err = dbPool.Do(execReq, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("round_create_failed", err.Error(), "error")
+		return nil, err
+	}
+
+	state := true
+	return &state, nil
+}
+
+func AddUserAuditLog(user_id int, audit_context string, audit_desc string, audit_type int, user_agent string, user_name string, ip string, by_id int, dbpool *pool.ConnectionPool) (*bool, error) {
+	// Prepare your SQL query
+	var sql = `INSERT INTO users_audits_space (
+				"user_audit_uuid", "user_id", "user_audit_context", "user_audit_desc", "audit_type_id", "user_agent", "operator",
+				"ip", "status_id", "order", "created_by", "created_at"
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		)`
+	audit_uuid, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return nil, err
+	}
+
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		audit_uuid,
+		user_id,
+		audit_context,
+		audit_desc,
+		audit_type,
+		user_agent,
+		user_name,
+		ip,
+		1,
+		0,
+		by_id,
+		now,
+	})
+
+	// Execute the query using the stream
+	_, err = dbpool.Do(execReq, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error(), "error")
+		return nil, err
+	}
+
+	state := true
+	return &state, nil
+}
+
+func AddPlayerAuditLog(player_id int, audit_context string, audit_desc string, audit_type int, user_agent string, user_name string, ip string, by_id int, dbpool *pool.ConnectionPool) (*bool, error) {
+	// Prepare your SQL query
+	var sql = `INSERT INTO players_audits_spaces (
+				"player_audit_uuid", "player_id", "player_audit_context", "player_audit_desc", "audit_type_id", "user_agent", "operator",
+				"ip", "status_id", "order", "created_by", "created_at"
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+		)`
+	audit_uuid, err := uuid.NewV7()
+	if err != nil {
+		return nil, err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return nil, err
+	}
+
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		audit_uuid,
+		player_id,
+		audit_context,
+		audit_desc,
+		audit_type,
+		user_agent,
+		user_name,
+		ip,
+		1,
+		0,
+		by_id,
+		now,
+	})
+
+	// Execute the query using the stream
+	_, err = dbpool.Do(execReq, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error(), "error")
+		return nil, err
+	}
+
+	state := true
+	return &state, nil
+}

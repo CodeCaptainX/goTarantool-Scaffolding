@@ -1,0 +1,159 @@
+package middlewares
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+	"{{PROJECT_NAME}}/internal/admin/auth"
+	types "{{PROJECT_NAME}}/pkg/share"
+	"{{PROJECT_NAME}}/pkg/utls"
+
+	response "{{PROJECT_NAME}}/pkg/http/response"
+
+	jwtware "github.com/gofiber/contrib/jwt"
+	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+func NewJwtMinddleWare(app *fiber.App, connPool *pool.ConnectionPool) {
+	// Load environment variables
+	errs := godotenv.Load()
+	if errs != nil {
+		log.Fatalf("Error loading .env file")
+	}
+	secret_key := os.Getenv("JWT_SECRET_KEY")
+
+	// JWT Middleware
+	app.Use(func(c *fiber.Ctx) error {
+		// Check if the request is upgrading to WebSocket
+		if websocketUpgrade := c.Get("Upgrade"); websocketUpgrade == "websocket" {
+			// Extract Bearer token from Sec-WebSocket-Protocol
+			webSocketProtocol := c.Get("Sec-WebSocket-Protocol")
+			if webSocketProtocol == "" {
+				return c.Status(http.StatusUnauthorized).JSON(fiber.Map{
+					"error": "Missing WebSocket protocol for authentication",
+				})
+			}
+
+			// Split "Bearer, <token>"
+			parts := strings.Split(webSocketProtocol, ",")
+			if len(parts) != 2 || strings.TrimSpace(parts[0]) != "Bearer" {
+				return c.Status(http.StatusUnauthorized).JSON(fiber.Map{
+					"error": "Invalid WebSocket protocol authentication format",
+				})
+			}
+
+			// Extract the JWT token from the second part
+			tokenString := strings.TrimSpace(parts[1])
+
+			// Parse the JWT token
+			token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+				return []byte(secret_key), nil
+			})
+			if err != nil || !token.Valid {
+				return c.Status(http.StatusUnauthorized).JSON(fiber.Map{
+					"error": "Invalid or expired JWT token",
+				})
+			}
+			c.Locals("jwt_data", token)
+			// Set the response header to echo back the protocol
+			c.Set("Sec-WebSocket-Protocol", "Bearer")
+			return c.Next()
+		}
+
+		// Apply JWT middleware for HTTP requests
+		return jwtware.New(jwtware.Config{
+			SigningKey: jwtware.SigningKey{Key: []byte(secret_key)},
+			ContextKey: "jwt_data",
+		})(c)
+	})
+
+	// User Context Middleware
+	app.Use(func(c *fiber.Ctx) error {
+		// Extract the JWT token data
+		user_token := c.Locals("jwt_data").(*jwt.Token)
+		pclaim := user_token.Claims.(jwt.MapClaims)
+
+		// Check if the connection is WebSocket and handle accordingly
+		if websocketUpgrade := c.Get("Upgrade"); websocketUpgrade == "websocket" {
+			// For WebSocket, ensure the token contains necessary claims
+			return handleUserContext(c, pclaim, connPool)
+		}
+
+		// Handle regular HTTP requests
+		return handleUserContext(c, pclaim, connPool)
+	})
+}
+
+// Helper function to handle user context creation and session validation
+func handleUserContext(c *fiber.Ctx, pclaim jwt.MapClaims, connPool *pool.ConnectionPool) error {
+	// Check login session
+	login_session, ok := pclaim["login_session"].(string)
+	if !ok || login_session == "" {
+		smg_error := response.NewResponseError(
+			utls.Translate("loginSessionMissing", nil, c),
+			-500,
+			fmt.Errorf(utls.Translate("loginSessionMissing", nil, c)),
+		)
+		return c.Status(http.StatusUnprocessableEntity).JSON(smg_error)
+	}
+
+	uuid, ok := pclaim["user_uuid"].(string)
+	if !ok {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			"Invalid or missing 'user_uuid' in claims", -500, fmt.Errorf("missing or invalid 'user_uuid'"),
+		))
+	}
+
+	username, ok := pclaim["username"].(string)
+	if !ok {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			"Invalid or missing 'username' in claims", -500, fmt.Errorf("missing or invalid 'username'"),
+		))
+	}
+
+	role_id, ok := pclaim["role_id"].(float64)
+	if !ok {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			"Invalid or missing 'role_id' in claims", -500, fmt.Errorf("missing or invalid 'role_id'"),
+		))
+	}
+
+	exp, ok := pclaim["exp"].(float64)
+	if !ok {
+		return c.Status(http.StatusUnprocessableEntity).JSON(response.NewResponseError(
+			"Invalid or missing 'exp' in claims", -500, fmt.Errorf("missing or invalid 'exp'"),
+		))
+	}
+
+	// Create and populate UserContext struct
+	uCtx := types.UserContext{
+		UserUuid:     uuid,
+		UserName:     username,
+		RoleId:       uint64(role_id),
+		LoginSession: login_session,
+		Exp:          time.Unix(int64(exp), 0),
+		UserAgent:    string(c.Context().UserAgent()),
+		Ip:           c.Context().RemoteIP().String(),
+	}
+	c.Locals("UserContext", uCtx)
+
+	// Validate login session
+	sv := auth.NewAuthService(connPool)
+	success, err := sv.CheckSession(login_session)
+	if err != nil || !success {
+		smg_error := response.NewResponseError(
+			utls.Translate("loginSessionInvalid", nil, c),
+			-500,
+			fmt.Errorf(utls.Translate("loginSessionInvalid", nil, c)),
+		)
+		return c.Status(http.StatusUnprocessableEntity).JSON(smg_error)
+	}
+
+	return c.Next()
+}

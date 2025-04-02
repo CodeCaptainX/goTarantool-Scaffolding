@@ -1,0 +1,25 @@
+info:
+  contact: {}
+paths:
+  /api/admin/v1/user/profile:
+    get:
+      consumes:
+      - application/json
+      description: Get user login session
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get GetLoginSession
+      tags:
+      - Admin/User
+swagger: "2.0"

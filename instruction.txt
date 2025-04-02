@@ -1,0 +1,2 @@
+go build -o goTarantool main.go
+sudo mv goTarantool /usr/local/bin/

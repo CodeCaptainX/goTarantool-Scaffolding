@@ -1,0 +1,14 @@
+package constants
+
+const (
+	UserNotificationDeleteSuccess           = 15001
+	UserNotificationDeleteFailed            = 15002
+	UserNotificationShowSuccess             = 15003
+	UserNotificationShowFailed              = 15004
+	UserNotificationReadNotificationSuccess = 15005
+	UserNotificationReadNotificationFailed  = 15006
+	UserAuditDeleteSuccess                  = 15001
+	UserAuditDeleteFailed                   = 15002
+	UserAuditShowSuccess                    = 15003
+	UserAuditShowFailed                     = 15004
+)

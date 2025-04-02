@@ -1,0 +1,51 @@
+package handler
+
+import (
+	"{{PROJECT_NAME}}/internal/admin/player"
+
+	"{{PROJECT_NAME}}/internal/admin/user"
+	user_audit "{{PROJECT_NAME}}/internal/admin/user-audit"
+
+	"{{PROJECT_NAME}}/internal/admin/websocket"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// ServiceHandlers groups all the module factories
+type ServiceHandlers struct {
+	Admin *AdminService
+}
+
+// Admin service handlers: register modules route here
+type AdminService struct {
+	UserHandler   *user.UserRoute
+	PlayerHandler *player.PlayerRoute
+
+	WebSocketHandler *websocket.WebSocketRoute
+	UserAuditHandler *user_audit.UserAuditRoute
+}
+
+func NewAdminService(app *fiber.App, connPool *pool.ConnectionPool) *AdminService {
+
+	// Register module [User] route
+	us := user.NewRoute(app, connPool).RegisterUserRoute()
+	py := player.NewRoute(app, connPool).RegisterPlayerRoute()
+	// Register module [User] route
+	ws := websocket.NewRoute(app, connPool).RegisterWebSocketRoute()
+	// Resgister module [user audit] route
+	ua := user_audit.NewRoute(app, connPool).RegisterUserAuditRoute()
+	return &AdminService{
+
+		UserHandler:      us,
+		PlayerHandler:    py,
+		WebSocketHandler: ws,
+		UserAuditHandler: ua,
+	}
+}
+
+func NewServiceHandlers(app *fiber.App, connPool *pool.ConnectionPool) *ServiceHandlers {
+	return &ServiceHandlers{
+		Admin: NewAdminService(app, connPool),
+	}
+}

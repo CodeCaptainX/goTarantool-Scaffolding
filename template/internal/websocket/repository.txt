@@ -1,0 +1,45 @@
+package websocket
+
+import (
+	"fmt"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/responses"
+	tarantool_pkg "{{PROJECT_NAME}}/pkg/tarantool"
+
+	types "{{PROJECT_NAME}}/pkg/share"
+
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+	_ "github.com/tarantool/go-tarantool/v2/uuid"
+)
+
+type UserRepo interface {
+	GetLoginSession(login_session string) (bool, *responses.ErrorResponse)
+}
+
+type UserRepoImpl struct {
+	userCtx types.UserContext
+	dbPool  *pool.ConnectionPool
+}
+
+func NewUserRepoImpl(u types.UserContext, db *pool.ConnectionPool) *UserRepoImpl {
+	return &UserRepoImpl{
+		userCtx: u,
+		dbPool:  db,
+	}
+}
+
+func (a *UserRepoImpl) GetLoginSession(login_session string) (bool, *responses.ErrorResponse) {
+	const key = "foo"
+	callback := func(event tarantool.WatchEvent) {
+		fmt.Printf("event connection: %s\n", event.Conn.Addr())
+		fmt.Printf("event key: %s\n", event.Key)
+		fmt.Printf("event value: %v\n", event.Value)
+	}
+	tarantool_pkg.NewSubscribeWatcher(key, callback, a.dbPool)
+
+	smg_error := fmt.Errorf("tarantool: invalid login session")
+	custom_log.NewCustomLog("login_failed", smg_error.Error())
+	err_resp := &responses.ErrorResponse{}
+	return true, err_resp.NewErrorResponse("login_failed", smg_error)
+}

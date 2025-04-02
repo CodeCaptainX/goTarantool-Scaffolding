@@ -1,0 +1,814 @@
+package user
+
+import (
+	"log"
+	ws "{{PROJECT_NAME}}/internal/admin/websocket"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	utls "{{PROJECT_NAME}}/pkg/utls"
+	"os"
+	"strings"
+	"time"
+
+	"fmt"
+
+	"github.com/gofiber/contrib/websocket"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	_ "github.com/tarantool/go-tarantool/v2/decimal"
+	"github.com/tarantool/go-tarantool/v2/pool"
+	_ "github.com/tarantool/go-tarantool/v2/uuid"
+)
+
+type UserRepo interface {
+	GetLoginSession(login_session string) (bool, *responses.ErrorResponse)
+	Show(userShowRequest UserShowRequest) (*UserResponse, *responses.ErrorResponse)
+	ShowOne(user_uuid uuid.UUID) (*UserResponse, *responses.ErrorResponse)
+	Create(usreq UserNewRequest) (*UserResponse, *responses.ErrorResponse)
+	Update(user_uuid uuid.UUID, usreq UserUpdateRequest) (*UserResponse, *responses.ErrorResponse)
+	Delete(user_uuid uuid.UUID) (*UserDeleteResponse, *responses.ErrorResponse)
+	GetUserFormCreate() (*UserFormCreateResponse, *responses.ErrorResponse)
+	GetUserFormUpdate(user_uuid uuid.UUID) (*UserFormUpdateResponse, *responses.ErrorResponse)
+	Update_Password(user_uuid uuid.UUID, usreq UserUpdatePasswordRequest) (*UserUpdatePasswordReponse, *responses.ErrorResponse)
+	GetUserBasicInfo(username string) (*UserBasicInfoResponse, *responses.ErrorResponse)
+}
+
+type UserRepoImpl struct {
+	userCtx *types.UserContext
+	dbPool  *pool.ConnectionPool
+}
+
+func NewUserRepoImpl(u *types.UserContext, db *pool.ConnectionPool) *UserRepoImpl {
+	return &UserRepoImpl{
+		userCtx: u,
+		dbPool:  db,
+	}
+}
+
+func (u *UserRepoImpl) GetLoginSession(login_session string) (bool, *responses.ErrorResponse) {
+	const key = "foo"
+	callback := func(event tarantool.WatchEvent) {
+		fmt.Printf("event connection: %s\n", event.Conn.Addr())
+		fmt.Printf("event key: %s\n", event.Key)
+		fmt.Printf("event value: %v\n", event.Value)
+		valueStr, ok := event.Value.(string)
+		if !ok {
+			fmt.Println("Error: event.Value is not a string")
+			return
+		}
+		conn, ok := ws.GetClient("c5b66b62-2cb0-4a2e-b704-1da97d8ed10d")
+		if ok {
+			err := conn.WriteMessage(websocket.TextMessage, []byte(valueStr))
+			if err != nil {
+				fmt.Println("Error sending message:", err)
+			}
+		} else {
+			fmt.Println("User not connected")
+		}
+
+	}
+	tarantool_utls.NewSubscribeWatcher(key, callback, u.dbPool)
+
+	smg_error := fmt.Errorf("tarantool: invalid login session")
+	custom_log.NewCustomLog("login_failed", smg_error.Error())
+	err_resp := &responses.ErrorResponse{}
+	return true, err_resp.NewErrorResponse("login_failed", smg_error)
+}
+
+// Test URL endpoint: {{ _.host }}/api/v1/admin/user?paging_options[page]=1&paging_options[per_page]=10&sorts[0][property]=u.id&sorts[0][direction]=desc&sorts[1][property]=u.user_name&sorts[1][direction]=desc&filters[0][property]=u.status_id&filters[0][value]=1
+func (u *UserRepoImpl) Show(userShowRequest UserShowRequest) (*UserResponse, *responses.ErrorResponse) {
+	// Paging
+	var per_page = userShowRequest.PageOptions.Perpage
+	var page = userShowRequest.PageOptions.Page
+	var offset = (page - 1) * per_page
+	var sql_limit = fmt.Sprintf(" LIMIT %d OFFSET %d", per_page, offset)
+
+	// Order By output will be: `ORDER BY u.id asc, u.user_name desc`
+	var sql_orderby = tarantool_utls.BuildSQLSort(userShowRequest.Sorts)
+
+	// Filters output of BuildSQLFilter() will be e.g. tarantool.NewExecuteRequest("WHERE.. AND u.status_id=$1").Args([1])
+	sql_filters, args_filters := tarantool_utls.BuildSQLFilter(userShowRequest.Filters)
+
+	if len(args_filters) > 0 {
+		sql_filters = " AND " + sql_filters
+	}
+
+	var sql = tarantool.NewExecuteRequest(
+		fmt.Sprintf(
+			`SELECT 
+			u.id, 
+			u.user_uuid, 
+			u.first_name, 
+			u.last_name, 
+			u.user_name, 
+			u.email, 
+			u.role_id, 
+			ur.user_role_name AS role_name, 
+			u.status, 
+			u.login_session, 
+			u.profile_photo, 
+			u.user_alias, 
+			u.phone_number, 
+			u.user_avatar_id, 
+			u.commission, 
+			u.status_id, 
+			u."order",            
+			u.created_by, 
+			creator.user_name AS creator, 
+			u.created_at, 
+			u.updated_by, 
+			u.updated_at, 
+			u.deleted_by, 
+			u.deleted_at
+		FROM 
+			users_space u
+		INNER JOIN 
+			users_roles_space ur 
+		ON  
+			u.role_id = ur.id
+		LEFT JOIN 
+			users_space creator
+		ON 
+			u.created_by = creator.id
+		WHERE 
+			u.deleted_at IS NULL AND u.role_id >= %d AND u.user_name != '%s' %s%s%s`,
+			u.userCtx.RoleId, u.userCtx.UserName, sql_filters, sql_orderby, sql_limit),
+	).Args(args_filters)
+
+	var sql_total = tarantool.NewExecuteRequest(
+		fmt.Sprintf(`SELECT 
+            COUNT(*) as total
+        FROM 
+            users_space u
+        WHERE u.deleted_at is null AND u.role_id >= %d  %s`,
+			u.userCtx.RoleId, sql_filters)).Args(args_filters)
+	// fmt.Println(sql_total)
+	var users []User
+	// Send the request and get the response
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("user_show_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_show_failed", fmt.Errorf("can select user the database error"))
+	}
+
+	// Decode the response data into the appropriate type
+	err = resp.DecodeTyped(&users)
+	if err != nil {
+		custom_log.NewCustomLog("user_show_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_show_failed", fmt.Errorf("can not decode the select user_space"))
+	}
+
+	var total []TotalRecord
+	// Send the request and get the response
+	resp_total, err := u.dbPool.Do(sql_total, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("user_show_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_show_failed", fmt.Errorf("can not select user total the database error"))
+	}
+
+	// Decode the response data into the appropriate type
+	err = resp_total.DecodeTyped(&total)
+	if err != nil {
+		custom_log.NewCustomLog("user_show_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_show_failed", fmt.Errorf("can not decode the select total user_space"))
+	}
+
+	return &UserResponse{Users: users, Total: total[0].Total}, nil
+}
+
+func (u *UserRepoImpl) ShowOne(user_uuid uuid.UUID) (*UserResponse, *responses.ErrorResponse) {
+
+	var sql = tarantool.NewExecuteRequest(
+		`SELECT 
+			u.id, 
+			u.user_uuid, 
+			u.first_name, 
+			u.last_name, 
+			u.user_name, 
+			u.email, 
+			u.role_id, 
+			ur.user_role_name AS role_name, 
+			u.status, 
+			u.login_session, 
+			u.profile_photo, 
+			u.user_alias, 
+			u.phone_number, 
+			u.user_avatar_id, 
+			u.commission, 
+			u.status_id, 
+			u."order",            
+			u.created_by, 
+			creator.user_name AS creator, 
+			u.created_at, 
+			u.updated_by, 
+			u.updated_at, 
+			u.deleted_by, 
+			u.deleted_at
+		FROM 
+			users_space u
+		INNER JOIN 
+			users_roles_space ur 
+		ON  
+			u.role_id = ur.id
+		LEFT JOIN 
+			users_space creator
+		ON 
+			u.created_by = creator.id
+		WHERE 
+			u.deleted_at IS NULL AND u.user_uuid = $1`,
+	).Args([]interface{}{user_uuid})
+
+	var users []User
+	// Send the request and get the response using the connection
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse() // Use the connection directly to execute the request
+	if err != nil {
+		custom_log.NewCustomLog("user_showone_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_showone_failed", fmt.Errorf("can not select user: database error"))
+	}
+
+	// Decode the response data into the appropriate type
+	err = resp.DecodeTyped(&users)
+	if err != nil {
+		custom_log.NewCustomLog("user_showone_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_showone_failed", fmt.Errorf("can not decode the select user_space"))
+	}
+
+	return &UserResponse{Users: users, Total: 0}, nil
+}
+
+func (u *UserRepoImpl) Create(usreq UserNewRequest) (*UserResponse, *responses.ErrorResponse) {
+
+	userAddModel := &UserAddModel{}
+
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_create_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest() // Use a separate variable for the BeginRequest
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_create_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = userAddModel.New(usreq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_create_failed", err)
+	}
+	// fmt.Println("UserAddModel:", userAddModel)
+
+	// Prepare your SQL query
+	var sql = `
+		INSERT INTO users_space (
+			"id", "user_uuid", "first_name", "last_name","user_name", "profile_photo","user_alias","password", "email",
+			"role_id", "status", "login_session", "phone_number", "commission", "order", "created_by", "created_at"
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+		)`
+
+	// Create a request with the SQL query
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		userAddModel.ID,
+		userAddModel.UserUUID,
+		userAddModel.FirstName,
+		userAddModel.LastName,
+		userAddModel.UserName,
+		userAddModel.ProfilePhoto,
+		userAddModel.UserAlias,
+		userAddModel.Password,
+		userAddModel.Email,
+		userAddModel.RoleId,
+		userAddModel.Status,
+		userAddModel.LoginSession,
+		userAddModel.PhoneNumber,
+		userAddModel.Commission,
+		userAddModel.Order,
+		userAddModel.CreatedBy,
+		userAddModel.CreatedAt,
+	})
+
+	// Execute the query using the stream
+	_, err = stream.Do(execReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_create_failed", err)
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest() // Use a separate variable for the CommitRequest
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_create_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	//Add Audit
+	var audit_des = fmt.Sprintf("New user `%s` has been created", userAddModel.UserName)
+	_, err = utls.AddUserAuditLog(
+		int(userAddModel.ID), "New User", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(userAddModel.CreatedBy), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("user_create_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_create_failed", fmt.Errorf("cannot add audit"))
+	}
+	return u.ShowOne(userAddModel.UserUUID)
+}
+
+func (u *UserRepoImpl) Update(user_uuid uuid.UUID, usreq UserUpdateRequest) (*UserResponse, *responses.ErrorResponse) {
+
+	userUpdateModel := &UserUpdateModel{}
+
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_update_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest() // Use a separate variable for the BeginRequest
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = userUpdateModel.New(user_uuid, usreq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_failed", err)
+	}
+	// fmt.Println("UserUpdateModel:", userUpdateModel)
+
+	// Prepare your SQL query
+	var sql = `UPDATE users_space SET
+				"first_name" = $1, 
+				"last_name" = $2, 
+				"email" = $3,
+				"role_id" = $4, 
+				"status_id" = $5, 
+				"phone_number" = $6, 
+				"commission" = $7, 
+				"updated_by" = $8, 
+				"updated_at" = $9
+			WHERE "user_uuid" = $10`
+
+	// Create a request with the SQL query
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		userUpdateModel.FirstName,
+		userUpdateModel.LastName,
+		userUpdateModel.Email,
+		userUpdateModel.RoleId,
+		userUpdateModel.StatusId,
+		userUpdateModel.PhoneNumber,
+		userUpdateModel.Commission,
+		userUpdateModel.UpdatedBy,
+		userUpdateModel.UpdatedAt,
+		userUpdateModel.UserUUID,
+	})
+	// Execute the query using the stream
+	_, err = stream.Do(execReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_failed", fmt.Errorf("cannot execute update"))
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest() // Use a separate variable for the CommitRequest
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	//Add Audit
+	var audit_des = fmt.Sprintf("Updating user `%s %s` has been sucessful", userUpdateModel.FirstName, userUpdateModel.LastName)
+	_, err = utls.AddUserAuditLog(
+		int(userUpdateModel.ID), "Update User", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(userUpdateModel.UpdatedBy), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_failed", fmt.Errorf("cannot add audit"))
+	}
+	return u.ShowOne(userUpdateModel.UserUUID)
+}
+
+func (u *UserRepoImpl) Delete(user_uuid uuid.UUID) (*UserDeleteResponse, *responses.ErrorResponse) {
+
+	// check permission (i don't user update info of the user that have bigger or equal role to him)
+	if u.userCtx.RoleId != 1 {
+		isDenied, err := tarantool_utls.IsExistsWhere("users_space", "role_id <= $1 AND user_uuid = $2", []interface{}{u.userCtx.RoleId, user_uuid}, u.dbPool)
+		if err != nil {
+			custom_log.NewCustomLog("user_delete_failed", err.Error(), "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("failed to get role check"))
+		} else {
+			if isDenied {
+				custom_log.NewCustomLog("user_delete_failed", "permission denied", "error")
+				err_resp := &responses.ErrorResponse{}
+				return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("permission denied : this user have the same or upper role to you"))
+			}
+		}
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		custom_log.NewCustomLog("user_delete_failed", fmt.Errorf("failed to load location: %w", err).Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("can not delete user"))
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		custom_log.NewCustomLog("user_delete_failed", fmt.Errorf("failed make datetime type for tarantool: %w", err).Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("can not delete user"))
+	}
+
+	//Get user logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", u.userCtx.UserUuid, u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("user_delete_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("can not delete user"))
+	}
+
+	//Get target delete user info
+	users, err_one := u.ShowOne(user_uuid)
+	if err_one != nil {
+		custom_log.NewCustomLog("user_delete_failed", err_one.Err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("User target to delete failed to get info"))
+
+	} else {
+		if len(users.Users) <= 0 {
+			custom_log.NewCustomLog("user_delete_failed", "Can not get info deleted user", "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("User target to delete not found"))
+		}
+	}
+
+	var sql = tarantool.NewExecuteRequest(
+		`UPDATE users_space SET
+			"status_id" = $1, 
+			"deleted_by"=$2, 
+			"deleted_at" = $3, 
+			"updated_by" = $4, 
+			"updated_at" = $5
+		WHERE "user_uuid" = $6`,
+	).Args([]interface{}{0, by_id, now, by_id, now, user_uuid})
+
+	// Send the request and get the response using the connection
+	_, err = u.dbPool.Do(sql, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_delete_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_delete_failed", fmt.Errorf("can not delete user: database error"))
+	}
+
+	//Update Session
+	login_session, _ := uuid.NewV7()
+	update := tarantool.NewExecuteRequest(
+		`UPDATE  users_space SET login_session=? WHERE user_uuid=?`).Args([]interface{}{login_session.String(), user_uuid})
+	_, err = u.dbPool.Do(update, pool.ANY).Get()
+	if err != nil {
+		log.Println("Error update session :", err.Error())
+	}
+
+	//Add Audit
+	var audit_des = fmt.Sprintf("Deleting user `%s %s` has been successful", users.Users[0].FirstName, users.Users[0].LastName)
+	_, err = utls.AddUserAuditLog(
+		int(users.Users[0].ID), "Delete User", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(*by_id), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("user_delete_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("cannot add audit"))
+	}
+
+	return &UserDeleteResponse{Success: true}, nil
+}
+
+func (u *UserRepoImpl) GetStatus() *[]types.Status {
+	return &types.StatusData
+}
+
+func (u *UserRepoImpl) GetRoles() (*[]Role, error) {
+	var role_placeholder string
+	if u.userCtx.RoleId == 1 {
+		role_placeholder = `r.id >= ?`
+	} else {
+		role_placeholder = `r.id > ?`
+	}
+	var sql = tarantool.NewExecuteRequest(fmt.Sprintf(`
+		SELECT 
+            id, user_role_name
+        FROM 
+            users_roles_space r
+        WHERE r.deleted_at is null AND %s ORDER BY r.user_role_name asc`, role_placeholder),
+	).Args([]interface{}{u.userCtx.RoleId})
+
+	var roles []Role
+	// Send the request and get the response using the connection
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse() // Use the connection directly to execute the request
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode the response data into the appropriate type
+	err = resp.DecodeTyped(&roles)
+	if err != nil {
+		return nil, err
+	}
+	return &roles, nil
+}
+
+func (u *UserRepoImpl) GetUserFormCreate() (*UserFormCreateResponse, *responses.ErrorResponse) {
+	status := u.GetStatus()
+	roles, err := u.GetRoles()
+	if err != nil {
+		custom_log.NewCustomLog("user_create_form_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_create_form_failed", fmt.Errorf("cannot get role"))
+	}
+
+	var userCreateForms = []UserCreateForm{
+		{
+			FirstName:       "",
+			LastName:        "",
+			UserName:        "",
+			Password:        "",
+			PasswordComfirm: "",
+			Email:           "",
+			RoleId:          1,
+			PhoneNumber:     "",
+			StatusId:        1,
+			Status:          *status,
+			Roles:           *roles,
+		},
+	}
+	return &UserFormCreateResponse{Users: userCreateForms}, nil
+}
+
+func (u *UserRepoImpl) GetUserFormUpdate(user_uuid uuid.UUID) (*UserFormUpdateResponse, *responses.ErrorResponse) {
+	// check permission (i don't user update info of the user that have bigger or equal role to him)
+	if u.userCtx.RoleId != 1 {
+		isDenied, err := tarantool_utls.IsExistsWhere("users_space", "role_id <= $1 AND user_uuid = $2", []interface{}{u.userCtx.RoleId, user_uuid}, u.dbPool)
+		if err != nil {
+			custom_log.NewCustomLog("user_delete_failed", err.Error(), "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("user_delete_failed", fmt.Errorf("failed to get role check"))
+		} else {
+			if isDenied {
+				custom_log.NewCustomLog("user_update_form_failed", "permission denied", "error")
+				err_resp := &responses.ErrorResponse{}
+				return nil, err_resp.NewErrorResponse("user_update_form_failed", fmt.Errorf("permission denied : this user have the same or upper role to you"))
+			}
+		}
+	}
+	//Get target update form user info
+	users, err_one := u.ShowOne(user_uuid)
+	if err_one != nil {
+		custom_log.NewCustomLog("user_update_form_failed", err_one.Err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_form_failed", fmt.Errorf("User target to delete failed to get info"))
+
+	} else {
+		if len(users.Users) <= 0 {
+			custom_log.NewCustomLog("user_update_form_failed", "Can not get info deleted user", "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("user_update_form_failed", fmt.Errorf("User target to delete not found"))
+		}
+	}
+
+	status := u.GetStatus()
+	roles, err := u.GetRoles()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_form_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_form_failed", fmt.Errorf("cannot get role"))
+	}
+
+	var userUpdateForms = []UserUpdateForm{
+		{
+			FirstName:   users.Users[0].FirstName,
+			LastName:    users.Users[0].LastName,
+			UserName:    users.Users[0].UserName,
+			Email:       users.Users[0].Email,
+			RoleId:      users.Users[0].RoleId,
+			PhoneNumber: *users.Users[0].PhoneNumber,
+			StatusId:    users.Users[0].StatusId,
+			Commission:  users.Users[0].Commission,
+			Status:      *status,
+			Roles:       *roles,
+		},
+	}
+	return &UserFormUpdateResponse{Users: userUpdateForms}, nil
+}
+
+func (u *UserRepoImpl) Update_Password(user_uuid uuid.UUID, usreq UserUpdatePasswordRequest) (*UserUpdatePasswordReponse, *responses.ErrorResponse) {
+
+	var RequestChangePassword = &UserUpdatePasswordModel{}
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("user_update_password_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest() // Use a separate variable for the BeginRequest
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = RequestChangePassword.New(user_uuid, usreq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", err)
+	}
+	//Get user logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", u.userCtx.UserUuid, u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("can not update password "))
+	}
+
+	//Get target delete user info
+	users, err_one := u.ShowOne(user_uuid)
+	if err_one != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err_one.Err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("User target to update password failed to get info"))
+
+	} else {
+		if len(users.Users) <= 0 {
+			custom_log.NewCustomLog("user_delete_failed", "Can not get info deleted user", "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("User target to update password not found"))
+		}
+	}
+
+	var sql = tarantool.NewExecuteRequest(
+		`UPDATE users_space SET
+			"password" = $1, "updated_by"=$2, "updated_at" = $3
+		WHERE "user_uuid" = $4`,
+	).Args([]interface{}{
+		RequestChangePassword.Password,
+		RequestChangePassword.UpdatedBy,
+		RequestChangePassword.UpdatedAt,
+		RequestChangePassword.UserUUID,
+	})
+	// Execute the query using the stream
+	_, err = stream.Do(sql).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("cannot execute update password"))
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest() // Use a separate variable for the CommitRequest
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	var audit_des = fmt.Sprintf("Updating `%s %s`'s password has been successful", users.Users[0].FirstName, users.Users[0].LastName)
+	_, err = utls.AddUserAuditLog(
+		int(users.Users[0].ID), "Update User's password", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(*by_id), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("user_update_password_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("user_update_password_failed", fmt.Errorf("cannot add audit"))
+	}
+
+	// Define notification content for password update
+	var notificationContext = "Password Update"
+	var notificationSubject = "Password Changed"
+	var notificationDescription = "Your account password has been successfully updated."
+
+	// Add the notification to the user's account
+	err = utls.AddNotification("users_notifications_space", "user", int(users.Users[0].ID),
+		notificationContext, notificationSubject, notificationDescription, 1, 1, *by_id, u.dbPool)
+
+	if err != nil {
+		fmt.Println("failed to add password update notification")
+	}
+
+	return &UserUpdatePasswordReponse{Success: true}, nil
+}
+
+func (u *UserRepoImpl) GetUserBasicInfo(username string) (*UserBasicInfoResponse, *responses.ErrorResponse) {
+	// prepare sql
+	var sql = tarantool.NewExecuteRequest(`
+		SELECT 
+			u.id, u.user_uuid, u.first_name, u.last_name, u.user_name, u.email, 
+			u.role_id, ur.user_role_name AS role_name, u.status, u.login_session, u.profile_photo, 
+			u.user_alias, u.phone_number, u.user_avatar_id, u.commission, u.status_id
+		FROM users_space u
+		INNER JOIN users_roles_space ur ON u.role_id = ur.id
+		WHERE u.deleted_at IS NULL AND ur.deleted_at IS NULL
+		AND u.user_name = $1
+	`).Args([]interface{}{username})
+
+	// execute request
+	var users_basic_info []UserInfo
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("get_userinfo_failed", err.Error(), "error")
+		errResp := &responses.ErrorResponse{}
+		return nil, errResp.NewErrorResponse("get_userinfo_failed", fmt.Errorf("cannot select user database error"))
+	}
+
+	// decode the response
+	err = resp.DecodeTyped(&users_basic_info)
+	if err != nil {
+		custom_log.NewCustomLog("get_userinfo_failed", err.Error(), "error")
+		errDecd := &responses.ErrorResponse{}
+		return nil, errDecd.NewErrorResponse("get_userinfo_failed", fmt.Errorf("cannot decode select user"))
+	}
+
+	if len(users_basic_info) == 0 {
+		custom_log.NewCustomLog("get_userinfo_failed", "no user found", "warn")
+		errMsg := &responses.ErrorResponse{}
+		return nil, errMsg.NewErrorResponse("get_userinfo_failed", fmt.Errorf("no user found"))
+	}
+
+	// prepare sql for get user permission
+	var per_sql = tarantool.NewExecuteRequest(`
+		SELECT
+			m.module_name,
+			rm.function_ids
+		FROM rel_roles_modules_space rm
+		INNER JOIN modules_space m ON rm.module_id = m.id
+		WHERE rm.deleted_at IS NULL AND rm.role_id = ?
+	`).Args([]interface{}{users_basic_info[0].RoleId})
+
+	// execute get use permission
+	var permissions []Permission
+	per_resp, err := u.dbPool.Do(per_sql, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("get_userinfo_failed", err.Error(), "warn")
+		errMsg := &responses.ErrorResponse{}
+		return nil, errMsg.NewErrorResponse("get_userinfo_failed", fmt.Errorf("cannot get user permission database error"))
+	}
+
+	if err = per_resp.DecodeTyped(&permissions); err != nil {
+		custom_log.NewCustomLog("get_userinfo_failed", err.Error(), "warn")
+		errMsg := &responses.ErrorResponse{}
+		return nil, errMsg.NewErrorResponse("get_userinfo_failed", fmt.Errorf("error decode user permission"))
+	}
+
+	var user_permission = UserPermission{
+		Modules: make(map[string][]string),
+	}
+
+	for _, perm := range permissions {
+		function_ids := strings.Split(perm.FunctionIDs, ",")
+		user_permission.Modules[perm.ModuleName] = function_ids
+	}
+	// fmt.Println("permission", user_permission)
+
+	return &UserBasicInfoResponse{UserBasicInfo: UserBasicInfo{
+		UserInfo:       users_basic_info[0],
+		UserPermission: user_permission,
+	}}, nil
+}

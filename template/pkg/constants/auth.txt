@@ -1,0 +1,8 @@
+package constants
+
+const (
+	AuthLogInSuccess        = 17000
+	AuthLogInFailed         = 17001
+	AuthCheckSessionSuccess = 17002
+	AuthCheckSessionFailed  = 17003
+)

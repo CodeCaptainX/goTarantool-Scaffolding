@@ -1,0 +1,138 @@
+package websocket
+
+import (
+	"fmt"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	types "{{PROJECT_NAME}}/pkg/share"
+	"log"
+	"sync"
+
+	"github.com/gofiber/contrib/websocket"
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// WebSocketHandler struct
+type WebSocketHandler struct {
+	db               *pool.ConnectionPool
+	webSocketService func(*websocket.Conn) webSocketCreator
+	writeChannel     chan []byte
+}
+
+func NewHandler(db *pool.ConnectionPool) *WebSocketHandler {
+	handler := &WebSocketHandler{
+		db: db,
+		webSocketService: func(c *websocket.Conn) webSocketCreator {
+			userContext := c.Locals("UserContext")
+			var uCtx types.UserContext
+			// Convert map to UserContext struct
+			if contextMap, ok := userContext.(types.UserContext); ok {
+				uCtx = contextMap
+			} else {
+				custom_log.NewCustomLog("user_context_failed", "extract user context failed", "warn")
+				uCtx = types.UserContext{}
+			}
+
+			// Store the connection in the global map
+			ClientsMutex.Lock()
+			Clients[uCtx.UserUuid] = c
+			ClientsMutex.Unlock()
+
+			// Pass uCtx to NewAuthService if needed
+			return NewwebSocketService(uCtx, db)
+		},
+	}
+	go handler.websocketWriter()
+	return handler
+}
+
+// Global map to store connections
+var (
+	Clients      = make(map[string]*websocket.Conn)
+	ClientsMutex = &sync.Mutex{} // To handle concurrent access
+)
+
+func GetClient(userUuid string) (*websocket.Conn, bool) {
+	ClientsMutex.Lock()
+	defer ClientsMutex.Unlock()
+
+	conn, ok := Clients[userUuid]
+	return conn, ok
+}
+
+func AddClient(userUuid string, conn *websocket.Conn) {
+	ClientsMutex.Lock()
+	defer ClientsMutex.Unlock()
+
+	Clients[userUuid] = conn
+}
+
+func RemoveClient(userUuid string) {
+	ClientsMutex.Lock()
+	defer ClientsMutex.Unlock()
+
+	delete(Clients, userUuid)
+}
+
+func (h *WebSocketHandler) websocketWriter() {
+	for message := range h.writeChannel {
+		ClientsMutex.Lock()
+		for _, conn := range Clients {
+			if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				log.Panicln("Error writting to Websocket :", err)
+			}
+		}
+		ClientsMutex.Unlock()
+	}
+}
+
+func (h *WebSocketHandler) HandleWebSocket(c *websocket.Conn) {
+	// Invoke webSocketService for any additional setup or service creation
+	h.webSocketService(c)
+
+	defer func() {
+		// Remove the connection from the global map when disconnected
+		userContext := c.Locals("UserContext").(types.UserContext)
+		ClientsMutex.Lock()
+		delete(Clients, userContext.UserUuid)
+		ClientsMutex.Unlock()
+		c.Close()
+	}()
+
+	// Handle WebSocket communication
+	var (
+		// mt  int
+		msg []byte
+		err error
+	)
+	for {
+		if _, msg, err = c.ReadMessage(); err != nil {
+			log.Println("read:", err)
+			break
+		}
+		log.Printf("recv: %s", msg)
+
+		// if err = c.WriteMessage(mt, msg); err != nil {
+		// 	log.Println("write:", err)
+		// 	break
+		// }
+		h.writeChannel <- msg
+	}
+
+}
+
+func (h *WebSocketHandler) BroadcastToUser(c *fiber.Ctx) error {
+	ClientsMutex.Lock()
+	defer ClientsMutex.Unlock()
+	userUuid := "c5b66b62-2cb0-4a2e-b704-1da97d8ed10d"
+	message := "Broadcast hello"
+	if conn, ok := Clients[userUuid]; ok {
+		err := conn.WriteMessage(websocket.TextMessage, []byte(message))
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+
+	return fmt.Errorf("user %s not connected", userUuid)
+}

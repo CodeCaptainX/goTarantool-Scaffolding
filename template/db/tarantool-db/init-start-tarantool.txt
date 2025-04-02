@@ -1,0 +1,1142 @@
+#! /usr/bin/tarantool
+-- This is default tarantool initialization file
+-- with easy to use configuration examples including
+-- replication, sharding and all major features
+-- Complete documentation available in:  http://tarantool.org/doc/
+--
+-- To start this instance please run `systemctl start tarantool@example` or
+-- use init scripts provided by binary packages.
+-- To connect to the instance, use "sudo tarantoolctl enter example"
+-- Features:
+-- 1. Database configuration
+-- 2. Binary logging and snapshots
+-- 3. Replication
+-- 4. Automatinc sharding
+-- 5. Message queue
+-- 6. Data expiration
+
+-----------------
+-- Configuration
+-----------------
+require('compat').sql_seq_scan_default = 'old'
+box.cfg {
+
+  ------------------------
+  -- Network configuration
+  ------------------------
+
+  -- The read/write data port number or URI
+  -- Has no default value, so must be specified if
+  -- connections will occur from remote clients
+  -- that do not use “admin address”
+  listen = 3301,
+  -- listen = '*:3301';
+
+  -- The server is considered to be a Tarantool replica
+  -- it will try to connect to the master
+  -- which replication_source specifies with a URI
+  -- for example konstantin:secret_password@tarantool.org:3301
+  -- by default username is "guest"
+  -- replication_source="127.0.0.1:3102";
+
+  -- The server will sleep for io_collect_interval seconds
+  -- between iterations of the event loop
+  io_collect_interval = nil,
+
+  -- The size of the read-ahead buffer associated with a client connection
+  readahead = 10 * 1024 * 1024,
+
+  --- Develoepr set for Fiber:
+  net_msg_max = 1048576,
+  ----------------------
+  -- Memtx configuration
+  ----------------------
+
+  -- An absolute path to directory where snapshot (.snap) files are stored.
+  -- If not specified, defaults to /var/lib/tarantool/INSTANCE
+  -- memtx_dir = nil;
+
+  -- How much memory Memtx engine allocates
+  -- to actually store tuples, in bytes.
+  -- memtx_memory = 128 * 1024 * 1024;
+  memtx_memory = 1024 * 1024 * 1024,
+
+  -- Size of the smallest allocation unit, in bytes.
+  -- It can be tuned up if most of the tuples are not so small
+  memtx_min_tuple_size = 16,
+
+  -- Size of the largest allocation unit, in bytes.
+  -- It can be tuned up if it is necessary to store large tuples
+  memtx_max_tuple_size = 10 * 1024 * 1024, -- 10Mb
+  vinyl_max_tuple_size = 10 * 1024 * 1024, -- 10Mb
+
+  ----------------------
+  -- Vinyl configuration
+  ----------------------
+
+  -- An absolute path to directory where Vinyl files are stored.
+  -- If not specified, defaults to /var/lib/tarantool/INSTANCE
+  -- vinyl_dir = nil;
+
+  -- How much memory Vinyl engine can use for in-memory level, in bytes.
+  vinyl_memory = 128 * 1024 * 1024, -- 128 mb
+
+  -- How much memory Vinyl engine can use for caches, in bytes.
+  vinyl_cache = 64 * 1024 * 1024, -- 64 mb
+
+  -- The maximum number of background workers for compaction.
+  vinyl_write_threads = 2,
+
+  ------------------------------
+  -- Binary logging and recovery
+  ------------------------------
+
+  -- An absolute path to directory where write-ahead log (.xlog) files are
+  -- stored. If not specified, defaults to /var/lib/tarantool/INSTANCE
+  -- wal_dir = nil;
+
+  -- Specify fiber-WAL-disk synchronization mode as:
+  -- "none": write-ahead log is not maintained;
+  -- "write": fibers wait for their data to be written to the write-ahead log;
+  -- "fsync": fibers wait for their data, fsync follows each write;
+  --    wal_mode = "none";
+  wal_mode = "write",
+
+  -- The maximal size of a single write-ahead log file
+  wal_max_size = 256 * 1024 * 1024,
+
+  -- The interval between actions by the snapshot daemon, in seconds
+  checkpoint_interval = 60 * 60, -- one hour
+
+  -- The maximum number of snapshots that the snapshot daemon maintans
+  checkpoint_count = 6,
+
+  -- Reduce the throttling effect of box.snapshot() on
+  -- INSERT/UPDATE/DELETE performance by setting a limit
+  -- on how many megabytes per second it can write to disk
+  snap_io_rate_limit = nil,
+
+  -- Don't abort recovery if there is an error while reading
+  -- files from the disk at server start.
+  force_recovery = true,
+
+  ----------
+  -- Logging
+  ----------
+
+  -- How verbose the logging is. There are six log verbosity classes:
+  -- 1 – SYSERROR
+  -- 2 – ERROR
+  -- 3 – CRITICAL
+  -- 4 – WARNING
+  -- 5 – INFO
+  -- 6 – DEBUG
+  log_level = 5,
+  --log = "tarantool.log";
+
+  -- By default, the log is sent to /var/log/tarantool/INSTANCE.log
+  -- If logger is specified, the log is sent to the file named in the string
+  --     log = "tarantool.log",
+  --     wal_dir = './db/wal',
+  --     memtx_dir = './db/memtx',
+  --     vinyl_dir = './db/vinyl',
+  --work_dir = './work',
+
+  -- If true, tarantool does not block on the log file descriptor
+  -- when it’s not ready for write, and drops the message instead
+  --log_nonblock = true;
+
+  -- If processing a request takes longer than
+  -- the given value (in seconds), warn about it in the log
+  too_long_threshold = 0.5,
+
+  -- Inject the given string into server process title
+  -- custom_proc_title = 'example';
+  background = false,
+  --pid_file = 'rust.pid';
+  memtx_use_mvcc_engine = true
+}
+
+local function bootstrap()
+  box.schema.user.create('cf', { password = 'cf' })
+  box.schema.user.grant('cf', 'read,write,execute,create,alter,drop', 'universe')
+  -- box.schema.user.grant('guest', 'read,write,execute', 'universe')
+  -- print("Granted permissions to guest user.")
+end
+box.once('grants2', bootstrap)
+
+json     = require('json')
+fiber    = require('fiber')
+uuid     = require("uuid")
+datetime = require("datetime")
+decimal  = require('decimal')
+console  = require("console");
+log      = require('log')
+
+
+-- define the to_char function
+function to_char(datetime, format)
+  -- convert the datetime value to a string
+  local datetime_str = tostring(datetime)
+  -- extract the year, month, day, hour, minute, second and millisecond parts
+  local year = string.sub(datetime_str, 1, 4)
+  local month = string.sub(datetime_str, 6, 7)
+  local day = string.sub(datetime_str, 9, 10)
+  local hour = string.sub(datetime_str, 12, 13)
+  local minute = string.sub(datetime_str, 15, 16)
+  local second = string.sub(datetime_str, 18, 19)
+  local millisecond = string.sub(datetime_str, 21)
+  -- replace the format placeholders with the corresponding parts
+  local formatted_str = format
+  formatted_str = string.gsub(formatted_str, "yyyy", year)
+  formatted_str = string.gsub(formatted_str, "mm", month)
+  formatted_str = string.gsub(formatted_str, "dd", day)
+  formatted_str = string.gsub(formatted_str, "hh", hour)
+  formatted_str = string.gsub(formatted_str, "mi", minute)
+  formatted_str = string.gsub(formatted_str, "ss", second)
+  formatted_str = string.gsub(formatted_str, "ms", millisecond)
+  -- return the formatted string as a tuple
+  return formatted_str
+end
+
+-- check if the function already exists
+if box.schema.func.exists('to_char') then
+  box.schema.func.drop('to_char');
+end
+if not box.schema.func.exists('to_char') then
+  -- make the function callable from SQL
+  box.schema.func.create('to_char',
+    { language = 'LUA', param_list = { 'datetime', 'string' }, returns = 'string', exports = { 'SQL' } })
+end
+
+-- define the unflatten_sql function
+function unflatten_sql(sql_res)
+  local objects = {}
+
+  for i, row in ipairs(sql_res.rows) do
+    local obj = {}
+    for j, col in ipairs(sql_res.metadata) do
+      obj[col.name] = row[j]
+    end
+
+    objects[i] = obj
+  end
+  --log.info(objects)
+  return objects
+end
+
+-- check if the function already exists
+if box.schema.func.exists('unflatten_sql') then
+  box.schema.func.drop('unflatten_sql');
+end
+
+function get_seq_current(seq_name)
+  local sequence = box.sequence[seq_name]
+  local current_value = sequence:current()
+  return current_value + 1
+end
+
+-- check if the function already exists
+if box.schema.func.exists('get_seq_current') then
+  box.schema.func.drop('get_seq_current')
+end
+
+if not box.schema.func.exists('get_seq_current') then
+  -- make the function callable from SQL
+  box.schema.func.create('get_seq_current',
+    { language = 'LUA', param_list = { 'string' }, returns = 'unsigned', exports = { 'SQL' } })
+end
+
+function get_seq_next(seq_name)
+  local sequence = box.sequence[seq_name]
+  return sequence:next() -- This is atomic and thread-safe
+end
+
+-- check if the function already exists
+if box.schema.func.exists('get_seq_next') then
+  box.schema.func.drop('get_seq_next')
+end
+
+if not box.schema.func.exists('get_seq_next') then
+  -- make the function callable from SQL
+  box.schema.func.create('get_seq_next',
+    { language = 'LUA', param_list = { 'string' }, returns = 'unsigned', exports = { 'SQL' } })
+end
+
+--Set New value seuquence
+function set_seq_val(seq_name)
+  local sequence = box.sequence[seq_name]
+  local next_value = sequence:next()
+  if next_value ~= nil then
+    local current_value = sequence:current()
+    return current_value
+  else
+    return 0
+  end
+end
+
+-- check if the function already exists
+if box.schema.func.exists('set_seq_val') then
+  box.schema.func.drop('set_seq_val')
+end
+
+if not box.schema.func.exists('set_seq_val') then
+  -- make the function callable from SQL
+  box.schema.func.create('set_seq_val',
+    { language = 'LUA', param_list = { 'string' }, returns = 'unsigned', exports = { 'SQL' } })
+end
+
+log = require('spaces')
+
+-- broadcast_player_notification
+function broadcast_player_notification(id)
+  local response = {
+    topic = "player_notification",
+    data = {
+      player_notifications = {}
+    }
+  }
+
+
+  local notification = box.execute([[
+    SELECT
+      p.player_uuid AS player_uuid,
+      pn.context AS context,
+      pn.subject AS subject,
+      pn.description AS description,
+      pn.icon_id AS icon_id
+    FROM players_notifications_space pn
+    INNER JOIN players_space p ON pn.player_id = p.id
+    WHERE pn.player_id = ? AND pn.deleted_at IS NULL
+    ORDER BY pn.created_at DESC
+    LIMIT 1]], { id })
+
+  local notificationData = unflatten_sql(notification)
+  if notificationData and #notificationData > 0 then
+    table.insert(response.data.player_notifications, {
+      player_uuid = notificationData[1]["player_uuid"],
+      context = notificationData[1]["context"],
+      subject = notificationData[1]["subject"],
+      description = notificationData[1]["description"],
+      icon_id = notificationData[1]["icon_id"]
+    })
+  end
+
+  box.broadcast('broadcast_bet_data', json.encode(response))
+end
+
+-- broadcast_round_status
+function broadcast_round_status(round_uuid, round_no, channel_id, status_id, time, by_id)
+  -- check if the channel_id already exists in the broadcasts_rounds_space
+  local round = box.execute(
+    [[SELECT id FROM latests_rounds_space WHERE channel_id = ?]],
+    { channel_id }
+  )
+
+  if #round.rows > 0 then
+    -- if the channel_id exists, update the row
+    box.execute(
+      [[UPDATE latests_rounds_space SET
+          latest_round_uuid = ?,
+          latest_round_no = ?,
+          status_id = ?,
+          updated_at = ?,
+          updated_by = ?
+        WHERE channel_id = ?
+      ]], {round_uuid, round_no, status_id, time, by_id, channel_id}
+    )
+  else
+    local new_id = get_seq_current('seq_latest_round_id')
+    -- if the channel_id does not exist, insert a new row
+    box.execute(
+      [[INSERT INTO latests_rounds_space 
+          (id, latest_round_uuid, latest_round_no, status_id, "order", channel_id, created_at, created_by)  
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ]], {new_id, round_uuid, round_no, status_id, new_id, channel_id, time, by_id}
+    )
+  end
+
+  -- prepare the response JSON
+  local response = {
+    topic = "round_status",
+    data = {
+      rounds = {}
+    }
+  }
+  -- fetch the updated/inserted row to broadcast
+  local rounds = box.execute(
+    [[SELECT id, latest_round_uuid, latest_round_no, status_id, channel_id 
+      FROM latests_rounds_space WHERE channel_id = ?]],
+    { channel_id }
+  )
+  -- assuming unflatten_sql is a utility function for unpacking SQL result
+  local rowData = unflatten_sql(rounds)
+
+  -- add the row data to the response
+  table.insert(response.data.rounds, {
+    id = rowData[1]["id"],
+    round_uuid = rowData[1]["latest_round_uuid"],
+    round_no = rowData[1]["latest_round_no"],
+    status_id = rowData[1]["status_id"],
+    channel_id = rowData[1]["channel_id"]
+  })
+
+  -- Broadcast the round status over WebSocket
+  box.broadcast('broadcast_global_data', json.encode(response))
+end
+
+
+-- Broadcast announcement
+function broadcast_announcement(announcement_uuid)
+  local response = {
+    topic = "announcement",
+    data = {
+      announcement = {}
+    }
+  }
+
+  -- Execute SQL query to get announcement details
+  local announcement = box.execute([[
+    SELECT
+      id,
+      announcement_uuid,
+      announcement_desc,
+      schedule_announce,
+      schedule_announce_expire,
+      announce_repeat,
+      status_id,
+      channel_id
+    FROM
+      announcements_space
+    WHERE
+      announcement_uuid = ?
+  ]], { announcement_uuid })
+
+  -- Unflatten the SQL response
+  local rowData = unflatten_sql(announcement)
+
+  -- Check if rowData has at least one entry
+  if #rowData > 0 then
+    -- Insert data into response
+    response.data.announcement = {
+      id = rowData[1]["id"],
+      announcement_uuid = rowData[1]["announcement_uuid"],
+      announcement_desc = rowData[1]["announcement_desc"],
+      schedule_announce = rowData[1]["schedule_announce"],
+      schedule_announce_expire = rowData[1]["schedule_announce_expire"],
+      announce_repeat = rowData[1]["announce_repeat"],
+      status_id = rowData[1]["status_id"],
+      channel_id = rowData[1]["channel_id"]
+    }
+    -- Broadcast the announcement
+    box.broadcast('broadcast_global_data', json.encode(response))
+  else
+    -- Handle the case when no announcement is found (optional)
+    box.error('No announcement found for the given UUID.')
+  end
+end
+
+-- broadcast_user_notification
+function broadcast_user_notification(uuid)
+  local response = {
+    topic = "user_notification",
+    data = {
+      user_notifications = {}
+    }
+  }
+
+  local notification = box.execute([[
+    SELECT
+      u.user_uuid AS user_uuid,
+      un.context AS context,
+      un.subject AS subject,
+      un.description AS description,
+      un.icon_id AS icon_id
+    FROM
+      users_notifications_space un
+    INNER JOIN users_space u ON un.user_id = u.id 
+    WHERE u.user_uuid = ? AND un.deleted_at IS NULL
+    ORDER BY un.created_at DESC
+    LIMIT 1]], { uuid })
+
+  local notificationData = unflatten_sql(notification)
+  if notificationData and #notificationData > 0 then
+    table.insert(response.data.user_notifications, {
+      user_uuid = notificationData[1]["user_uuid"],
+      context = notificationData[1]["context"],
+      subject = notificationData[1]["subject"],
+      description = notificationData[1]["description"],
+      icon_id = notificationData[1]["icon_id"]
+    })
+  end
+
+  box.broadcast('broadcast_admin_data', json.encode(response))
+end
+
+-- broadcast_balance_update
+function broadcast_balance_update(login_id, member_id, currency_id, balance)
+  local response = {
+    topic = "balance_update",
+    data = {
+      balance_update = {}
+    }
+  }
+
+  table.insert(response.data.balance_update, {
+    login_id = login_id,
+    member_id = member_id,
+    currency_id = currency_id,
+    balance = balance
+  })
+
+  box.broadcast('broadcast_bet_data', json.encode(response))
+end
+
+function broadcast_channel(channel_id, channel_name, stream_one, stream_two, status_id)
+  local response = {
+    topic = "channel",
+    data = {
+      channel = {}
+    }
+  }
+  table.insert(response.data.channel, {
+    channel_id = channel_id,
+    channel_name = channel_name,
+    stream_one = stream_one,
+    stream_two = stream_two,
+    status_id = status_id
+  })
+
+  box.broadcast("broadcast_global_data", json.encode(response))
+end
+
+-- broadcast_result
+function broadcast_result(result_uuid)
+  local response = {
+    topic = "result",
+    data = {
+      result = {}
+    }
+  }
+
+  local result = box.execute([[
+    SELECT
+      r.result_uuid, rd.round_uuid, rd.round_no,
+      rd.channel_id, r.bet_type_id, b.bet_type_name
+    FROM results_space r
+    INNER JOIN rounds_space rd ON r.round_id = rd.id
+    INNER JOIN bets_types_space b ON r.bet_type_id = b.id
+    WHERE r.result_uuid = ? AND r.deleted_at IS NULL
+  ]], {result_uuid})
+
+  local resultData = unflatten_sql(result)
+  if resultData and #resultData > 0 then
+    table.insert(response.data.result, {
+      result_uuid = resultData[1]["result_uuid"],
+      round_uuid = resultData[1]["round_uuid"],
+      round_no = resultData[1]["round_no"],
+      channel_id = resultData[1]["channel_id"],
+      bet_type_id = resultData[1]["bet_type_id"],
+      bet_type_name = resultData[1]["bet_type_name"]
+    })
+  end
+
+  box.broadcast('broadcast_global_data', json.encode(response))
+
+end
+
+-- broadcast_player_balance
+function broadcast_player_balance(player_id, currency_id)
+  local response = {
+    topic = "player_balance",
+    data = {
+      player_balance = {}
+    }
+  }
+
+  local player_balance = box.execute([[
+    SELECT
+      p.player_uuid AS player_uuid, pb.currency_id AS currency_id, pb.balance AS balance
+    FROM players_balances_space pb
+    INNER JOIN players_space p ON pb.player_id = p.id
+    WHERE pb.deleted_at IS NULL AND p.deleted_at IS NULL 
+    AND player_id = ? AND currency_id = ?
+  ]], {player_id, currency_id})
+
+  local playerBalanceData = unflatten_sql(player_balance)
+
+  if playerBalanceData and #playerBalanceData > 0 then
+    table.insert(response.data.player_balance, {
+      player_uuid = playerBalanceData[1].player_uuid,
+      currency_id = playerBalanceData[1].currency_id,
+      balance = playerBalanceData[1].balance
+    })
+  end
+
+  box.broadcast("broadcast_bet_data", json.encode(response))
+end
+
+function broadcast_total_bet(channel_id, date, bet_type_id)
+  local response = {
+    topic = "total_bet",
+    data = {
+      bet = {}
+    }
+  }
+
+  local date_str = to_char(date, "yyyy-mm-dd")
+  local date_obj = datetime.parse(date_str .. "T00:00:00+07:00")
+  local start_date = datetime.new{year=date_obj.year, month=date_obj.month, day=date_obj.day, hour=0, min=0, sec=0, tzoffset=date_obj.tzoffset}
+  local end_date = datetime.new{year=date_obj.year, month=date_obj.month, day=date_obj.day, hour=23, min=59, sec=59, tzoffset=date_obj.tzoffset}
+
+  total_bet_amount = box.execute([[
+    SELECT
+      COALESCE(
+          SUM(
+            CASE 
+              WHEN b.currency_id = 1 AND b.player_id != 1 THEN b.bet_amount
+              WHEN b.currency_id != 1 AND b.player_id != 1 THEN b.bet_amount * cr.rate
+              ELSE 0
+            END
+          ), 0
+        ) AS total_bet_amount
+    FROM bets_space b
+    INNER JOIN currencies_defaults_rates_space cr ON b.currency_id = cr.currency_id
+    WHERE b.channel_id = ? AND b.created_at BETWEEN ? AND ? AND b.bet_type_id = ? AND b.deleted_at IS NULL AND b.player_id != 1
+  ]], {channel_id, start_date, end_date, bet_type_id})
+
+  local total_bet_amount_data = unflatten_sql(total_bet_amount)
+
+  if total_bet_amount_data and #total_bet_amount_data > 0 then
+    table.insert(response.data.bet, {
+      channel_id = channel_id,
+      date = date_str,
+      bet_type_id = bet_type_id,
+      total_bet_amount = total_bet_amount_data[1].total_bet_amount,
+      currency_id = 1
+    })
+  end
+  box.broadcast("broadcast_admin_data", json.encode(response))
+end
+
+function broadcast_total_bet_by_round(channel_id, round_id, round_uuid, bet_type_id)
+  local response = {
+    topic = "total_bet_by_round",
+    player_bet_number = 0,
+    admin_bet_number = 0,
+    data = {
+      bets = {}
+    }
+  }
+  total_bet_amount_by_round = box.execute([[
+    SELECT
+        COALESCE(SUM(
+            CASE 
+                WHEN b.currency_id = 1 THEN b.bet_amount
+                ELSE b.bet_amount * cr.rate
+            END
+        ), 0) AS total_bet_amount,
+
+        COALESCE(SUM(
+            CASE 
+                WHEN b.currency_id = 1 AND b.player_id = 1 AND p.user_name NOT LIKE 'IT%' THEN b.bet_amount
+                WHEN b.currency_id != 1 AND b.player_id = 1 AND p.user_name NOT LIKE 'IT%' THEN b.bet_amount * cr.rate
+                ELSE 0
+            END
+        ), 0) AS total_admin_bet_amount,
+
+        COALESCE(SUM(
+            CASE 
+                WHEN b.currency_id = 1 AND b.player_id != 1 AND p.user_name NOT LIKE 'IT%' THEN b.bet_amount
+                WHEN b.currency_id != 1 AND b.player_id != 1 AND p.user_name NOT LIKE 'IT%' THEN b.bet_amount * cr.rate
+                ELSE 0
+            END
+        ), 0) AS total_player_bet_amount
+
+    FROM bets_space b
+    INNER JOIN currencies_defaults_rates_space cr ON b.currency_id = cr.currency_id
+    LEFT JOIN players_space p ON p.id = b.player_id
+    WHERE b.channel_id = ? AND b.round_id = ? AND b.bet_type_id = ? AND b.deleted_at IS NULL
+  ]], {channel_id, round_id, bet_type_id})
+
+  total_bet_number = box.execute([[
+    SELECT
+      SUM(CASE WHEN b.player_id != 1 AND p.user_name NOT LIKE 'IT%' THEN 1 ELSE 0 END) AS player_bet_number,
+      SUM(CASE WHEN b.player_id = 1 AND p.user_name NOT LIKE 'IT%' THEN 1 ELSE 0 END) AS admin_bet_number
+    FROM 
+      bets_space b
+    LEFT JOIN players_space p ON p.id = b.player_id
+    WHERE 
+      b.channel_id = $1
+      AND b.round_id = $2
+      AND b.deleted_at IS NULL;
+  ]], {channel_id, round_id})
+
+  local total_bet_amount_by_round_data = unflatten_sql(total_bet_amount_by_round)
+  local total_bet_number_data = unflatten_sql(total_bet_number)
+  if total_bet_amount_by_round_data and #total_bet_amount_by_round_data > 0 then
+
+    response.data.player_bet_number = total_bet_number_data[1].player_bet_number
+    response.data.admin_bet_number = total_bet_number_data[1].admin_bet_number
+
+    table.insert(response.data.bets, {
+      channel_id = channel_id,
+      round_uuid = round_uuid,
+      bet_type_id = bet_type_id,
+      total_bet_amount = total_bet_amount_by_round_data[1].total_bet_amount,
+      total_admin_bet_amount = total_bet_amount_by_round_data[1].total_admin_bet_amount,
+      total_player_bet_amount = total_bet_amount_by_round_data[1].total_player_bet_amount,
+      currency_id = 1,
+    })
+  end
+  box.broadcast("broadcast_admin_data", json.encode(response))
+end
+
+-- Broadcast announcement banner
+function broadcast_announcement_banner(announcement_uuid)
+  local response = {
+    topic = "announcement_banner",
+    data = {
+      announcement_banner = {}
+    }
+  }
+
+  -- Execute SQL query to get announcement banner details
+  local announcement_banner = box.execute([[
+    SELECT
+      text_en,
+      text_zh,
+      text_km,
+      channel_id
+    FROM
+      announcements_banners_space
+    WHERE
+      announcement_uuid = ?
+  ]], { announcement_uuid })
+
+  -- Unflatten the SQL response
+  local rowData = unflatten_sql(announcement_banner)
+
+  -- Check if rowData has at least one entry
+  if #rowData > 0 then
+    -- Insert data into response
+    response.data.announcement_banner = {
+      text_en = rowData[1]["text_en"],
+      text_zh = rowData[1]["text_zh"],
+      text_km = rowData[1]["text_km"],
+      channel_id = rowData[1]["channel_id"]
+    }
+    -- Broadcast the announcement banner
+    box.broadcast('broadcast_global_data', json.encode(response))
+  else
+    -- Handle the case when no announcement banner is found (optional)
+    box.error('No announcement banner found for the given UUID.')
+  end
+end
+
+function broadcast_global_data(key, data)
+  box.broadcast(key, data)
+end
+
+-- broadcast_fight_odd
+function broadcast_fake_fight_odd(fight_odd_uuid, red_odd, blue_odd, draw_odd, channel_id)
+  local response = {
+    topic = "fight_odd",
+    data = {
+      fight_odd = {}
+    }
+  }
+
+  table.insert(response.data.fight_odd, {
+    fight_odd_uuid = fight_odd_uuid,
+    channel_id = channel_id,
+    red_odd = red_odd,
+    blue_odd = blue_odd,
+    draw_odd = draw_odd,
+  })
+
+  box.broadcast("broadcast_global_data", json.encode(response))
+end
+
+-- broadcast_fight_odd
+function broadcast_update_fight_odd(fight_odd_data)
+  local response = {
+    topic = "update_fight_odd",
+    data = {
+      update_fight_odd = {}
+    }
+  }
+
+  if fight_odd_data and #fight_odd_data > 0 then
+    table.insert(response.data.update_fight_odd, {
+      fight_odd_uuid = fight_odd_data[1]["fight_odd_uuid"],
+      channel_id = fight_odd_data[1]["channel_id"],
+      red_odd = fight_odd_data[1]["red_odd"],
+      blue_odd = fight_odd_data[1]["blue_odd"],
+      draw_odd = fight_odd_data[1]["draw_odd"],
+      status_id = fight_odd_data[1]["status_id"],
+    })
+  end
+
+  print(json.encode(response))
+
+  box.broadcast("broadcast_admin_data", json.encode(response))
+end
+
+-- broadcast_fight_odd
+function broadcast_fight_odd(fight_odd_uuid)
+  local response = {
+    topic = "fight_odd",
+    data = {
+      fight_odd = {}
+    }
+  }
+
+  local fight_odd = box.execute([[
+    SELECT
+      fight_odd_uuid, channel_id, 
+      red_odd, blue_odd, draw_odd, status_id
+    FROM fights_odds_space
+    WHERE deleted_at IS NULL AND fight_odd_uuid = ?
+  ]], {fight_odd_uuid})
+
+  local fightOddData = unflatten_sql(fight_odd)
+
+  if fightOddData and #fightOddData > 0 then
+    table.insert(response.data.fight_odd, {
+      fight_odd_uuid = fightOddData[1]["fight_odd_uuid"],
+      channel_id = fightOddData[1]["channel_id"],
+      red_odd = fightOddData[1]["red_odd"],
+      blue_odd = fightOddData[1]["blue_odd"],
+      draw_odd = fightOddData[1]["draw_odd"],
+      status_id = fightOddData[1]["status_id"],
+    })
+  end
+
+  print(json.encode(response))
+
+  box.broadcast("broadcast_global_data", json.encode(response))
+
+  broadcast_update_fight_odd(fightOddData)
+end
+
+-- Broadcast bet limit
+function broadcast_bet_limit(bet_limit_uuid)
+  local response = {
+    topic = "bet_limit",
+    data = {
+      bet_limits = {}
+    }
+  }
+
+  -- Execute SQL query to get bet limit details
+  local bet_limit = box.execute([[
+    SELECT
+    	bet_limit, channel_id
+    FROM
+      bets_limits_space
+    WHERE
+      bet_limit_uuid = ?
+  ]], { bet_limit_uuid })
+
+  -- Unflatten the SQL response
+  local rowData = unflatten_sql(bet_limit)
+
+  -- Check if rowData has at least one entry
+  if #rowData > 0 then
+    -- Insert data into response
+    table.insert(response.data.bet_limits, {
+      bet_limit = rowData[1]["bet_limit"],
+      channel_id = rowData[1]["channel_id"],
+      bet_limit_uuid = bet_limit_uuid
+    })
+    -- Broadcast the bet limit
+    box.broadcast('broadcast_global_data', json.encode(response))
+  else
+    -- Handle the case when no bet limit is found (optional)
+    box.error('No bet limit found for the given UUID.')
+  end
+end
+
+function get_fraud_players(filter_sql, sort_sql, limit_sql, args)
+  local sql = [[
+		WITH latest_bets AS (
+			-- Get the last 10 bets per player
+			SELECT b1.*
+			FROM bets_space b1
+			JOIN (
+				SELECT player_id, MAX(CAST(round_id AS INTEGER)) AS latest_round
+				FROM bets_space
+				WHERE round_id IS NOT NULL
+				GROUP BY player_id
+			) b2 ON b1.player_id = b2.player_id
+			WHERE CAST(b1.round_id AS INTEGER) BETWEEN b2.latest_round - 9 AND b2.latest_round
+		),
+		win_streak AS (
+			-- Detect if there are at least 3 consecutive wins in the last 10 bets
+			SELECT lb1.player_id
+			FROM latest_bets lb1
+			JOIN latest_bets lb2
+				ON lb1.player_id = lb2.player_id
+				AND CAST(lb1.round_id AS INTEGER) = CAST(lb2.round_id AS INTEGER) + 1
+			JOIN latest_bets lb3
+				ON lb2.player_id = lb3.player_id
+				AND CAST(lb2.round_id AS INTEGER) = CAST(lb3.round_id AS INTEGER) + 1
+			WHERE lb1.is_win = TRUE AND lb2.is_win = TRUE AND lb3.is_win = TRUE
+			GROUP BY lb1.player_id
+		),
+		betting_back AS (
+			-- Detect "betting back" (losing a round, then increasing bet amount in the next round)
+			SELECT lb1.player_id
+			FROM latest_bets lb1
+			JOIN latest_bets lb2
+				ON lb1.player_id = lb2.player_id
+				AND CAST(lb1.round_id AS INTEGER) = CAST(lb2.round_id AS INTEGER) + 1
+			WHERE lb2.is_win = FALSE AND lb1.bet_amount > lb2.bet_amount
+			GROUP BY lb1.player_id
+		),
+		player_stats AS (
+			SELECT
+				player_id,
+				COUNT(*) AS total_bets,
+				SUM(CASE WHEN is_win = TRUE THEN 1 ELSE 0 END) AS total_wins,
+				MAX(bet_amount) AS last_bet_amount,
+				MAX(created_at) AS last_bet_time
+			FROM latest_bets
+			GROUP BY player_id
+		)
+		SELECT
+			b.player_id,
+			p.user_name AS player_name,
+			'[' ||
+				TRIM(BOTH ',' FROM
+					(CASE WHEN ws.player_id IS NOT NULL THEN '"win_streak",' ELSE '' END ||
+					CASE WHEN bb.player_id IS NOT NULL THEN '"betting_back",' ELSE '' END)
+				)
+			|| ']' AS fraud_types,
+			ps.total_bets,
+			ps.total_wins,
+			ps.last_bet_amount,
+			ps.last_bet_time,
+			CASE p.status_id
+				WHEN 1 THEN 'active'
+				WHEN 2 THEN 'pending'
+				WHEN 3 THEN 'restricted'
+				WHEN 4 THEN 'fraudulent'
+				ELSE 'Unknown'
+			END AS player_status,
+			p.status_id
+		FROM latest_bets b
+		LEFT JOIN win_streak ws ON b.player_id = ws.player_id
+		LEFT JOIN betting_back bb ON b.player_id = bb.player_id
+		LEFT JOIN player_stats ps ON b.player_id = ps.player_id
+		LEFT JOIN players_space p ON b.player_id = p.id
+		WHERE p.deleted_at IS NULL %s
+		GROUP BY
+			b.player_id,
+			ps.total_bets,
+			ps.total_wins,
+			ps.last_bet_amount,
+			ps.last_bet_time,
+			p.status_id
+		%s %s
+  ]]
+
+  -- Format the query with dynamic filter, sorting, and limit
+  local final_sql = string.format(sql, filter_sql or "", sort_sql or "", limit_sql or "")
+
+  local response = box.execute(final_sql, args)
+
+  print("first response", json.encode(response.rows))
+
+  -- Map results to custom column names
+  local flattened_result = {}
+  local column_names = {
+    "player_id", "player_name", "fraud_types", "total_bets", "total_wins", "last_bet_amount", "last_bet_time", "player_status", "player_status_id"
+  }
+
+  for _, row in ipairs(response.rows) do
+      local mapped_row = {}
+      for i, col_name in ipairs(column_names) do
+          mapped_row[col_name] = row[i]
+      end
+      table.insert(flattened_result, mapped_row)
+  end
+
+  print("second response", json.encode(flattened_result))
+
+  return json.encode(flattened_result)
+end
+
+
+
+-- function get_fraud_players_real()
+--   local players = {}
+
+--   -- Fetch all necessary data from spaces (tables)
+--   local bets = box.space.bets_space:select{}
+--   local players_space = box.space.players_space:select{}
+
+--   -- Organize bets by player
+--   local player_bets = {}
+--   for _, bet in ipairs(bets) do
+--       local player_id = bet[1]  -- Assuming first column is player_id
+--       local round_id = tonumber(bet[2])  -- Assuming second column is round_id
+--       local is_win = bet[3]  -- Assuming third column is is_win
+--       local bet_amount = bet[4]  -- Assuming fourth column is bet_amount
+--       local created_at = bet[5]  -- Assuming fifth column is created_at
+
+--       if not player_bets[player_id] then
+--           player_bets[player_id] = {}
+--       end
+--       table.insert(player_bets[player_id], {
+--           round_id = round_id,
+--           is_win = is_win,
+--           bet_amount = bet_amount,
+--           created_at = created_at
+--       })
+--   end
+
+--   -- Analyze each player's betting behavior
+--   for player_id, bets in pairs(player_bets) do
+--       table.sort(bets, function(a, b) return a.round_id > b.round_id end)  -- Sort by latest round_id
+
+--       -- Keep only the last 10 bets
+--       if #bets > 10 then
+--           bets = { unpack(bets, 1, 10) }
+--       end
+
+--       -- Detect fraud patterns
+--       local has_win_streak = false
+--       local has_betting_back = false
+
+--       for i = 3, #bets do
+--           if bets[i-2].is_win and bets[i-1].is_win and bets[i].is_win then
+--               has_win_streak = true
+--               break
+--           end
+--       end
+
+--       for i = 2, #bets do
+--           if not bets[i].is_win and bets[i-1].bet_amount > bets[i].bet_amount then
+--               has_betting_back = true
+--               break
+--           end
+--       end
+
+--       -- Get player info
+--       local player_info = {}
+--       for _, p in ipairs(players_space) do
+--           if p[1] == player_id then  -- Assuming first column is player_id
+--               player_info = {
+--                   player_name = p[2],  -- Assuming second column is user_name
+--                   status_id = p[3],    -- Assuming third column is status_id
+--               }
+--               break
+--           end
+--       end
+
+--       -- Build result entry
+--       table.insert(players, {
+--           player_id = player_id,
+--           player_name = player_info.player_name or "Unknown",
+--           fraud_types = json.encode({
+--               has_win_streak and "win_streak" or nil,
+--               has_betting_back and "betting_back" or nil
+--           }),
+--           total_bets = #bets,
+--           total_wins = #bets - table.filter(bets, function(b) return not b.is_win end),
+--           last_bet_amount = bets[1] and bets[1].bet_amount or 0,
+--           last_bet_time = bets[1] and bets[1].created_at or "",
+--           player_status = ({ [1] = "active", [2] = "pending", [3] = "restricted", [4] = "fraudulent" })[player_info.status_id] or "Unknown",
+--           status_id = player_info.status_id or 0
+--       })
+--   end
+
+--   return json.encode(players)
+-- end
+
+
+function detect_fraud()
+  local fraud_players = {}
+  local status_map = {
+      [1] = "active",
+      [2] = "pending",
+      [3] = "restricted",
+      [4] = "fraudulent"
+  }
+
+  -- Fetch last 10 bets per player directly using SQL (sorted ASC for fraud detection)
+  local players = {}
+  for _, bet in box.space.bets_space.index.player_id:pairs({}, {iterator = 'EQ'}) do
+      local player_id = bet.player_id
+      if not players[player_id] then
+          -- Fetch the last 10 bets for this player, sorted by `created_at ASC`
+          players[player_id] = box.space.bets_space.index.player_id:select(player_id, {iterator = 'GE', limit = 10})
+      end
+  end
+
+  -- print("players detection", json.encode(players))
+
+  -- Detect fraud patterns
+  for player_id, bets in pairs(players) do
+      local win_streak = false
+      local betting_back = false
+      local total_wins = 0
+
+      -- Fetch player info
+      local player_info = box.space.players_space:get(player_id)
+      local player_name = player_info and player_info.user_name or "Unknown"
+      local player_status_id = player_info and player_info.status_id or 0
+      local player_status = status_map[player_status_id] or "Unknown"
+
+      -- Iterate once over bets to check both conditions
+      for i = 1, #bets do
+          local bet = bets[i]
+          if bet.is_win then
+              total_wins = total_wins + 1
+          end
+
+          -- Check for win streak of at least 3 consecutive wins
+          if i >= 3 and bets[i].is_win and bets[i-1].is_win and bets[i-2].is_win then
+              win_streak = true
+          end
+
+          -- Check for betting back pattern
+          if i > 1 and not bets[i-1].is_win and bet.bet_amount >= (bets[i-1].bet_amount * 1.5) then
+              betting_back = true
+          end
+      end
+
+      -- If fraud detected, add player to fraud_players
+      local fraud_types = {}
+      if win_streak then table.insert(fraud_types, "win_streak") end
+      if betting_back then table.insert(fraud_types, "betting_back") end
+
+      if #fraud_types > 0 then
+          table.insert(fraud_players, {
+              player_id = player_id,
+              player_name = player_name,
+              fraud_types = fraud_types,
+              total_bets = #bets,
+              total_wins = total_wins,
+              last_bet_amount = bets[#bets].bet_amount,
+              last_bet_time = bets[#bets].created_at,
+              player_status = player_status,
+              player_status_id = player_status_id
+          })
+      end
+  end
+
+  -- print("json encode", json.encode(fraud_players))
+  return json.encode(fraud_players)
+end
+
+
+
+
+
+
+
+
+

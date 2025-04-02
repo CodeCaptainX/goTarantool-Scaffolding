@@ -1,0 +1,62 @@
+package utls
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+func AddNotification(tbl_notification_name string, notification_target_to string, userid_or_playerid int, context string, subject string, desc string, icon_id int, notification_type_id int, by_id int, dbPool *pool.ConnectionPool) error {
+	//prepare sql
+	var sql = fmt.Sprintf(`INSERT INTO %s (
+				"notification_uuid", "%s_id", "context", "subject", "description",
+				"icon_id", "notification_type_id", "status_id", "created_by", "created_at"
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+			)`, tbl_notification_name, notification_target_to)
+	notification_uuid, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		notification_uuid,
+		userid_or_playerid,
+		context,
+		subject,
+		desc,
+		icon_id,
+		notification_type_id,
+		1,
+		by_id,
+		now,
+	})
+
+	//execute sql
+	_, err = dbPool.Do(execReq, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("round_create_failed", err.Error(), "error")
+		return err
+	}
+
+	return nil
+}

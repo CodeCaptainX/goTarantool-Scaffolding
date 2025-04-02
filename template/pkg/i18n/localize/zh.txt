@@ -1,0 +1,56 @@
+{
+    "welcome": "欢迎！",
+    "welcomeWithName": "你好，{{.name}!",
+    "failed": "失败",
+    "loginFailed": "登录失败",
+    "login_failed": "登录失败",
+    "loginSuccess": "登录成功",
+    "loginSessionMissing": "登录会话丢失",
+    "loginSessionInvalid": "登录 `session id` 无效",
+    "jwtTokenInvalid": "无效的令牌",
+    "getLoginSessionSuccess": "获取登录会话成功",
+    "getLoginSessionFailed": "获取登录会话失败",
+
+    "user_show_success": "获取用户成功",
+    "user_show_failed": "获取用户失败",
+    "user_showone_success": "获取用户成功",
+    "user_showone_failed": "获取用户失败",
+    "user_create_success": "创建用户成功",
+    "user_create_failed": "创建用户失败",
+    "user_update_success": "更新用户成功",
+    "user_update_failed": "更新用户失败",
+    "user_delete_success": "删除用户成功",
+    "user_delete_failed": "删除用户失败",
+    "user_create_form_success": "获取用户创建表单成功",
+    "user_create_form_failed": "获取用户创建表单失败",
+    "user_update_form_success": "获取用户更新表单成功",
+    "user_update_form_failed": "获取用户更新表单失败",
+    
+    "player_show_success": "成功获取所有玩家",
+    "player_show_failed": "获取所有玩家失败",
+    "player_showone_success": "成功获取玩家",
+    "player_showone_failed": "获取玩家失败",
+    "player_not_found": "找不到玩家",
+    "player_create_success": "创建玩家成功",
+    "player_create_failed": "创建玩家失败",
+    "player_update_success": "更新玩家成功",
+    "player_update_failed": "更新玩家失败",
+    "player_delete_success": "删除玩家成功",
+    "player_delete_failed": "删除玩家失败",
+    "player_create_form_success": "成功创建玩家的创建表单",
+    "player_create_form_failed": "创建玩家的创建表单失败",
+    "player_update_form_failed": "更新玩家的表单失败",
+    "player_update_form_success": "更新玩家的表单成功",
+
+
+    "user_update_password_failed": "更新密码失败",
+    "user_update_password_success": "更新密码成功",
+    "player_update_password_failed": "更新密码失败",
+    "player_update_password_success": "更新密码成功",
+
+   
+    "get_userinfo_success" : "用户信息获取成功",
+    "get_userinfo_failed" : "获取用户信息失败"
+
+}
+

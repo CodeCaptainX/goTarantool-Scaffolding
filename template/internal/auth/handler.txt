@@ -1,0 +1,105 @@
+package auth
+
+import (
+	"net/http"
+
+	"{{PROJECT_NAME}}/pkg/constants"
+	response "{{PROJECT_NAME}}/pkg/http/response"
+	"{{PROJECT_NAME}}/pkg/utls"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// AuthHandler struct
+type AuthHandler struct {
+	db          *pool.ConnectionPool
+	authService Authenticator
+}
+
+func NewHandler(db *pool.ConnectionPool) *AuthHandler {
+	return &AuthHandler{
+		db:          db,
+		authService: NewAuthService(db),
+	}
+}
+
+// Login godoc
+// @Summary Login
+// @Description User login
+// @Tags Admin/Auth
+// @Accept json
+// @Produce json
+// @Param user body AuthLoginRequest true "Credentials to use"
+// @Success 200 {object} AuthLoginResponse
+// @Failure 400 {object} utls.Error
+// @Failure 401 {object} utls.Error
+// @Failure 422 {object} utls.Error
+// @Failure 404 {object} utls.Error
+// @Failure 500 {object} utls.Error
+// @Router /api/admin/v1/auth/login [post]
+func (h *AuthHandler) Login(c *fiber.Ctx) error {
+	v := utls.NewValidator()
+	req := &AuthLoginRequest{}
+
+	//Bind and validate
+	if err := req.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("loginFailed", nil, c),
+				constants.AuthLogInFailed,
+				err,
+			),
+		)
+	}
+
+	//Service
+	success, err := h.authService.LogIn(req.Auth.Username, req.Auth.Password)
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.AuthLogInFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("loginSuccess", nil, c),
+			constants.AuthLogInSuccess,
+			success,
+		))
+	}
+
+}
+
+func (h *AuthHandler) MiniLogin(c *fiber.Ctx) error {
+	v := utls.NewValidator()
+	mini_req := MiniLoginRequest{}
+
+	//Bind and validate
+	if err := mini_req.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("loginFailed", nil, c),
+				constants.AuthLogInFailed,
+				err,
+			),
+		)
+	}
+
+	//Service
+	success, err := h.authService.MiniLogin(mini_req)
+	if err != nil {
+		return c.Status(http.StatusUnauthorized).JSON(response.NewResponseError(
+			utls.Translate(err.MessageID, nil, c),
+			constants.AuthLogInFailed,
+			err.Err,
+		))
+	} else {
+		return c.Status(http.StatusOK).JSON(response.NewResponse(
+			utls.Translate("loginSuccess", nil, c),
+			constants.AuthLogInSuccess,
+			success,
+		))
+	}
+
+}

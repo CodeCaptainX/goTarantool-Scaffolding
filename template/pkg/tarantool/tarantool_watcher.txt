@@ -1,0 +1,79 @@
+package tarantool
+
+import (
+	"fmt"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/responses"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+var watcherMap sync.Map
+var globalWatcherMu sync.Mutex // Declare the mutex
+
+func NewSubscribeWatcher(key string, callback func(event tarantool.WatchEvent), dbPool *pool.ConnectionPool) (bool, *responses.ErrorResponse) {
+	globalWatcherMu.Lock()
+	defer globalWatcherMu.Unlock()
+
+	// Check if a watcher already exists for this key
+	if _, ok := watcherMap.Load(key); ok {
+		custom_log.NewCustomLog("tarantool_subscribe_watcher", "Watcher already exists for key: "+key, "info")
+		return true, nil
+	}
+
+	// Create a new watcher
+	watcher, err := dbPool.NewWatcher(key, callback, pool.ANY)
+	if err != nil {
+		custom_log.NewCustomLog("tarantool_subscribe_watcher", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return false, err_resp.NewErrorResponse("tarantool_subscribe_watcher", fmt.Errorf("failed to create watcher: %v", err))
+	}
+
+	// Store the watcher in the map
+	watcherMap.Store(key, watcher)
+
+	// Start a ticker for resubscribing
+	ticker := time.NewTicker(1 * time.Minute) // Adjust the duration as needed
+	go func() {
+		defer ticker.Stop()
+		for range ticker.C {
+			globalWatcherMu.Lock()
+			// Check if the watcher has been unregistered
+			if _, ok := watcherMap.Load(key); !ok {
+				// Attempt to resubscribe
+				newWatcher, err := dbPool.NewWatcher(key, callback, pool.ANY)
+				if err != nil {
+					custom_log.NewCustomLog("tarantool_subscribe_watcher", err.Error(), "error")
+					globalWatcherMu.Unlock()
+					continue
+				}
+				// Update the map with the new watcher
+				watcherMap.Store(key, newWatcher)
+				custom_log.NewCustomLog("tarantool_subscribe_watcher", "Resubscribed for key: "+key, "info")
+			}
+			globalWatcherMu.Unlock()
+		}
+	}()
+
+	// Unregister the watcher after a longer timeout (e.g., 10 minutes)
+	go func() {
+		time.Sleep(10 * time.Minute) // Adjust as needed
+		globalWatcherMu.Lock()
+		defer globalWatcherMu.Unlock()
+
+		// Unregister and remove the watcher from the map
+		if watcher, ok := watcherMap.Load(key); ok {
+			watcher.(tarantool.Watcher).Unregister()
+			watcherMap.Delete(key)
+		}
+	}()
+
+	// Log successful subscription
+	uuidstr, _ := uuid.NewV7()
+	custom_log.NewCustomLog("tarantool_subscribe_watcher", "Success subscribe Tarantool Watcher key: "+uuidstr.String(), "info")
+	return true, nil
+}

@@ -1,0 +1,589 @@
+package tarantool
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+
+	types "{{PROJECT_NAME}}/pkg/share"
+
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+func CountRow(res tarantool.Response) (int, error) {
+	hd := res.Header()
+	if hd.Error != tarantool.ErrorNo {
+		return 0, fmt.Errorf("tarantool error: %d", hd.Error)
+	}
+	count, err := res.Decode()
+	if err != nil {
+		return 0, err
+	} else {
+		return len(count), nil
+	}
+
+}
+
+func ToTarantoolDateTime(v interface{}) (map[string]interface{}, error) {
+	val := reflect.ValueOf(v)
+	if val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	result := make(map[string]interface{})
+
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Field(i)
+		tag := val.Type().Field(i).Tag.Get("json")
+		if tag != "" {
+			tagParts := strings.Split(tag, ",")
+			fieldName := tagParts[0]
+			// Skip fields with `json:"-"`
+			if fieldName == "-" {
+				continue
+			}
+			if field.Type() == reflect.TypeOf(datetime.Datetime{}) {
+				if !field.IsZero() {
+					dt := field.Interface().(datetime.Datetime)
+					result[fieldName] = dt.ToTime().Format(time.RFC3339)
+				} else {
+					result[fieldName] = nil
+				}
+			} else if field.Type() == reflect.TypeOf(&datetime.Datetime{}) {
+				if !field.IsNil() {
+					dt := field.Interface().(*datetime.Datetime)
+					result[fieldName] = dt.ToTime().Format(time.RFC3339)
+				} else {
+					result[fieldName] = nil
+				}
+			} else {
+				result[fieldName] = field.Interface()
+			}
+		}
+	}
+
+	return result, nil
+}
+
+func BuildSQLSort(sorts []types.Sort) string {
+	if len(sorts) == 0 {
+		return " ORDER BY id" // Default order
+	}
+
+	var orderClauses []string
+	for _, sort := range sorts {
+		orderClauses = append(orderClauses, fmt.Sprintf("%s %s", sort.Property, sort.Direction))
+	}
+
+	return " ORDER BY " + strings.Join(orderClauses, ", ")
+}
+
+// func BuildSQLFilter(req []types.Filter) (string, []interface{}) {
+// 	var sqlFilters []string
+// 	var params []interface{}
+// 	//get current time
+// 	app_timezone := os.Getenv("APP_TIMEZONE")
+// 	location, err := time.LoadLocation(app_timezone)
+// 	if err != nil {
+// 		return "", nil
+// 	}
+
+// 	placeholderIndex := 1
+// 	for _, filter := range req {
+// 		paramPlaceholder := fmt.Sprintf("$%d", placeholderIndex)
+
+// 		// Convert the filter value to the appropriate type
+// 		switch v := filter.Value.(type) {
+// 		case string:
+// 			if intValue, err := strconv.Atoi(v); err == nil {
+// 				filter.Value = intValue
+// 			} else if boolValue, err := strconv.ParseBool(v); err == nil {
+// 				filter.Value = boolValue
+// 			} else {
+// 				filter.Value = v
+// 			}
+// 		}
+
+// 		// Handle the converted value
+// 		switch v := filter.Value.(type) {
+// 		case int:
+// 			// Default handling for a single int value
+// 			sqlFilters = append(sqlFilters, fmt.Sprintf("%s = %s", filter.Property, paramPlaceholder))
+// 			params = append(params, v)
+// 			placeholderIndex++
+// 		case bool:
+// 			sqlFilters = append(sqlFilters, fmt.Sprintf("%s = %s", filter.Property, paramPlaceholder))
+// 			params = append(params, v)
+// 			placeholderIndex++
+// 		case string:
+// 			if strings.Contains(v, "%") {
+// 				// Handle cases with LIKE for wildcard searches
+// 				sqlFilters = append(sqlFilters, fmt.Sprintf("%s LIKE %s", filter.Property, paramPlaceholder))
+// 			} else if dateValue, err := time.Parse("2006-01-02", v); err == nil {
+// 				// Convert date-only input to datetime range
+// 				startOfDay := time.Date(dateValue.Year(), dateValue.Month(), dateValue.Day(), 0, 0, 0, 0, location)
+// 				endOfDay := startOfDay.Add(24 * time.Hour).Add(-time.Second)
+// 				start, err := datetime.MakeDatetime(startOfDay)
+// 				if err != nil {
+// 					return "", nil
+// 				}
+// 				end, err := datetime.MakeDatetime(endOfDay)
+// 				if err != nil {
+// 					return "", nil
+// 				}
+
+// 				// Add BETWEEN clause for date range
+// 				sqlFilters = append(sqlFilters, fmt.Sprintf("%s BETWEEN %s AND %s", filter.Property, paramPlaceholder, fmt.Sprintf("$%d", placeholderIndex+1)))
+// 				params = append(params, start, end)
+// 				// Skip further processing for this filter
+// 				placeholderIndex += 2
+// 				continue
+// 			} else {
+// 				sqlFilters = append(sqlFilters, fmt.Sprintf("%s = %s", filter.Property, paramPlaceholder))
+// 			}
+// 			params = append(params, v)
+// 			placeholderIndex++
+// 		default:
+// 			return "", nil // Handle unsupported types if necessary
+// 		}
+// 	}
+
+// 	// Join the filters with " AND "
+// 	filterClause := strings.Join(sqlFilters, " AND ")
+
+// 	return filterClause, params
+// }
+
+func BuildSQLFilter(req []types.Filter) (string, []interface{}) {
+	var sqlFilters []string
+	var params []interface{}
+
+	// Get the current time for date handling
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return "", nil
+	}
+
+	// Map to group filters by Property
+	propertyMap := make(map[string][]interface{})
+
+	// Convert filter values and group them by Property
+	for _, filter := range req {
+		switch v := filter.Value.(type) {
+		case string:
+			if intValue, err := strconv.Atoi(v); err == nil {
+				filter.Value = intValue
+			} else if boolValue, err := strconv.ParseBool(v); err == nil {
+				filter.Value = boolValue
+			}
+		}
+		// Group by property name
+		propertyMap[filter.Property] = append(propertyMap[filter.Property], filter.Value)
+	}
+
+	// Process each grouped property
+	placeholderIndex := 1
+	for property, values := range propertyMap {
+		if len(values) > 1 {
+			// Use IN clause if multiple values for the same property
+			placeholders := []string{}
+			for _, value := range values {
+				placeholders = append(placeholders, fmt.Sprintf("$%d", placeholderIndex))
+				params = append(params, value)
+				placeholderIndex++
+			}
+			sqlFilters = append(sqlFilters, fmt.Sprintf("%s IN (%s)", property, strings.Join(placeholders, ", ")))
+		} else {
+			// Default handling for a single value
+			value := values[0]
+			paramPlaceholder := fmt.Sprintf("$%d", placeholderIndex)
+			switch v := value.(type) {
+			case int, bool:
+				sqlFilters = append(sqlFilters, fmt.Sprintf("%s = %s", property, paramPlaceholder))
+				params = append(params, v)
+			case string:
+				if strings.Contains(v, "%") {
+					sqlFilters = append(sqlFilters, fmt.Sprintf("%s LIKE %s", property, paramPlaceholder))
+				} else if dateValue, err := time.Parse("2006-01-02", v); err == nil {
+					// Convert date-only input to datetime range
+					startOfDay := time.Date(dateValue.Year(), dateValue.Month(), dateValue.Day(), 0, 0, 0, 0, location)
+					endOfDay := startOfDay.Add(24 * time.Hour).Add(-time.Second)
+					start, err := datetime.MakeDatetime(startOfDay)
+					if err != nil {
+						return "", nil
+					}
+					end, err := datetime.MakeDatetime(endOfDay)
+					if err != nil {
+						return "", nil
+					}
+					sqlFilters = append(sqlFilters, fmt.Sprintf("%s BETWEEN %s AND %s", property, paramPlaceholder, fmt.Sprintf("$%d", placeholderIndex+1)))
+					params = append(params, start, end)
+					placeholderIndex += 2
+					continue
+				} else {
+					sqlFilters = append(sqlFilters, fmt.Sprintf("%s = %s", property, paramPlaceholder))
+				}
+				params = append(params, v)
+			}
+			placeholderIndex++
+		}
+	}
+
+	// Join the filters with " AND "
+	filterClause := strings.Join(sqlFilters, " AND ")
+
+	return filterClause, params
+}
+
+func GetIdByUuid(space_name string, uuid_field_name string, uuid_str string, conn interface{}) (*int, error) {
+	var id []types.FieldId
+	// Define the SQL query
+	sql := fmt.Sprintf(`SELECT id FROM %s WHERE %s=$1`, space_name, uuid_field_name)
+	//Generate user UUID
+	uid, err := uuid.Parse(uuid_str)
+	if err != nil {
+		return nil, err
+	}
+	// Create the execute request with the query and argument
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{uid})
+	// Check the type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(execReq, pool.ANY).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(execReq).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported exec type")
+	}
+	if len(id) == 0 {
+		return nil, err
+	}
+
+	// Convert uint64 to int
+	idInt := int(id[0].Id) // Make sure the value fits into int
+	return &idInt, nil
+}
+
+// Get seq currentval+1 from Tarantool function
+func GetSeqNextVal(seq_name string, conn interface{}) (*int, error) {
+	var id []types.FieldId
+	// Define the SQL query
+	sql := fmt.Sprintf(`SELECT get_seq_current('%s') as id`, seq_name)
+
+	// Create the execute request with the query and argument
+	execReq := tarantool.NewExecuteRequest(sql)
+	// Check the type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(execReq, pool.ANY).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(execReq).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported exec type")
+	}
+
+	// Convert uint64 to int
+	idInt := int(id[0].Id)
+
+	return &idInt, nil
+}
+
+func GetSeqNext(seq_name string, conn interface{}) (*int, error) {
+	var id []types.FieldId
+	// Define the SQL query
+	sql := fmt.Sprintf(`SELECT get_seq_next('%s') as id`, seq_name)
+
+	// Create the execute request with the query and argument
+	execReq := tarantool.NewExecuteRequest(sql)
+	// Check the type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(execReq, pool.ANY).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(execReq).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported exec type")
+	}
+
+	// Convert uint64 to int
+	idInt := int(id[0].Id)
+
+	return &idInt, nil
+}
+
+func SetSeqNextVal(seq_name string, conn interface{}) (*int, error) {
+	var id []types.FieldId
+	// Define the SQL query
+	sql := fmt.Sprintf(`SELECT set_seq_val('%s') as id`, seq_name)
+
+	// Create the execute request with the query and argument
+	execReq := tarantool.NewExecuteRequest(sql)
+	// Check the type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(execReq, pool.ANY).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return nil, err
+		}
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(execReq).GetResponse()
+		if err != nil {
+			// fmt.Println(err, "err 1")
+			return nil, err
+		}
+		// fmt.Println(resp)
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			// fmt.Println(err, "err 2")
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported exec type")
+	}
+
+	// Convert uint64 to int
+	idInt := int(id[0].Id)
+	return &idInt, nil
+}
+
+// Get if exists
+func IsExists(space_name string, field_name string, value interface{}, conn interface{}) (bool, error) {
+	// fmt.Println("hello 2 form exist")
+	var id []types.FieldId
+	// Define the SQL query
+	sql := fmt.Sprintf(`SELECT 1 as id FROM %s WHERE %s=$1 AND deleted_at IS NULL`, space_name, field_name)
+
+	// Create the execute request with the query and argument
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{value})
+	// Check the type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(execReq, pool.ANY).GetResponse()
+		if err != nil {
+			return false, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return false, err
+		}
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(execReq).GetResponse()
+		if err != nil {
+			return false, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("unsupported exec type")
+	}
+
+	if len(id) > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// Get if exists
+func IsExistsWhere(space_name string, where_sqlstr string, args []interface{}, conn interface{}) (bool, error) {
+	var id []types.FieldId
+	// Define the SQL query
+	sql := fmt.Sprintf(`SELECT 1 as id FROM %s WHERE %s AND deleted_at IS NULL`, space_name, where_sqlstr)
+	execReq := tarantool.NewExecuteRequest(sql).Args(args)
+	// Check the type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(execReq, pool.ANY).GetResponse()
+		if err != nil {
+			return false, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return false, err
+		}
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(execReq).GetResponse()
+		if err != nil {
+			return false, err
+		}
+		err = resp.DecodeTyped(&id)
+		if err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("unsupported exec type")
+	}
+
+	if len(id) > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+func InvokeBroadcast(broadcast_func string, args []interface{}, conn interface{}) error {
+	//define sql
+	sqlBroadCast := tarantool.NewCallRequest(broadcast_func).Args(args)
+	//check type of exec and handle accordingly
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		//if exec is a connection pool, use it to execute the query
+		_, err := e.Do(sqlBroadCast, pool.ANY).GetResponse()
+		if err != nil {
+			return err
+		}
+	case *tarantool.Stream:
+		//if exec is a stream, use it to execute the query
+		_, err := e.Do(sqlBroadCast).GetResponse()
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupport exec type")
+	}
+	return nil
+}
+
+// Get platform by id
+func GetPlatformById(id uint64, conn interface{}) (*types.Platform, error) {
+	var sql = tarantool.NewExecuteRequest(
+		`SELECT 
+			id, membership_platform_uuid, platform_name, platform_host, platform_token,
+			internal_token, platform_extra_payload, status_id, "order"
+		FROM memberships_platforms_space
+		WHERE deleted_at is NULL 
+		AND id = $1`).Args([]interface{}{id})
+
+	var platform []types.Platform
+	switch e := conn.(type) {
+	case *pool.ConnectionPool:
+		// If exec is a connection pool, use it to execute the query
+		resp, err := e.Do(sql, pool.ANY).GetResponse()
+
+		if err != nil {
+			return nil, err
+		}
+		if err := resp.DecodeTyped(&platform); err != nil {
+			return nil, err
+		}
+
+	case *tarantool.Stream:
+		// If exec is a stream, use it to execute the query
+		resp, err := e.Do(sql).GetResponse()
+		if err != nil {
+			return nil, err
+		}
+		if err := resp.DecodeTyped(&platform); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported exec type")
+	}
+
+	if len(platform) == 0 {
+		return nil, fmt.Errorf("cannot get platform")
+	}
+
+	return &platform[0], nil
+}
+
+func StringToIntSlice(input string) ([]int, error) {
+	// Split the string by comma
+	splitValues := strings.Split(input, ",")
+
+	// Slice to hold integer values
+	var intValues []int
+
+	// Convert each string value to an integer
+	for _, str := range splitValues {
+		num, err := strconv.Atoi(str)
+		if err != nil {
+			return nil, fmt.Errorf("error converting '%s' to int: %v", str, err)
+		}
+		// Append to the intValues slice
+		intValues = append(intValues, num)
+	}
+
+	return intValues, nil
+}
+
+func ConvertToUpperNoSpace(input string) (string, error) {
+	// Check if the input is empty or consists only of whitespace
+	if strings.TrimSpace(input) == "" {
+		return "", errors.New("input string is empty or invalid")
+	}
+
+	// Remove all spaces
+	noSpace := strings.ReplaceAll(input, " ", "")
+
+	// Convert to uppercase
+	return strings.ToUpper(noSpace), nil
+}

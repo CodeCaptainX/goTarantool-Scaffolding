@@ -1,0 +1,197 @@
+package share
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2/decimal"
+)
+
+type UserContext struct {
+	UserUuid     string
+	UserName     string
+	RoleId       uint64
+	LoginSession string
+	Exp          time.Time
+	UserAgent    string
+	Ip           string
+}
+type Paging struct {
+	Page    int `json:"page" query:"page" validate:"required,min=1"`
+	Perpage int `json:"per_page" query:"per_page" validate:"required,min=1"`
+}
+type Sort struct {
+	Property  string `json:"property" validate:"required"`
+	Direction string `json:"direction" validate:"required,oneof=asc desc"`
+}
+type Filter struct {
+	Property string      `json:"property" validate:"required"`
+	Value    interface{} `json:"value" validate:"required"`
+}
+
+type FieldId struct {
+	Id uint64 `json:"id"`
+}
+
+type FieldFunctionIds struct {
+	FunctionIDs string `json:"function_ids"`
+}
+
+type Status struct {
+	Id         int    `json:"id"`
+	StatusName string `json:"status_name"`
+}
+
+type BroadcastResponse struct {
+	Topic string          `json:"topic"`
+	Data  json.RawMessage `json:"data"`
+}
+
+var StatusData = []Status{
+	{Id: 1, StatusName: "Active"},
+	{Id: 2, StatusName: "Inactive"},
+	{Id: 3, StatusName: "Suspended"},
+	{Id: 4, StatusName: "Deleted"},
+}
+
+// Platform Mini
+type Platform struct {
+	ID                     uint64    `json:"id"`
+	MembershipPlatformUUID uuid.UUID `json:"membership_platform_uuid"`
+	PlatformName           string    `json:"platform_name"`
+	PlatformHost           string    `json:"platform_host"`
+	PlatformToken          string    `json:"platform_token"`
+	PlatformExtraPayload   string    `json:"platform_extra_payload"`
+	InternalToken          string    `json:"internal_token"`
+	StatusID               uint64    `json:"status_id"`
+	Order                  uint64    `json:"order"`
+}
+
+// for channel
+type BroadcastChannelData struct {
+	Channel []ChannelBroadcasts `json:"channel"`
+}
+
+type ChannelBroadcasts struct {
+	ChannelID   uint64 `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	StreamOne   string `json:"stream_one"`
+	StreamTwo   string `json:"stream_two"`
+	StatusID    uint64 `json:"status_id"`
+}
+
+// for announcement
+type BroadcastAnnouceData struct {
+	Announcement AnnouncementDetail `json:"announcement"`
+}
+
+type AnnouncementDetail struct {
+	ID                     int    `json:"id"`
+	AnnouncementUUID       string `json:"announcement_uuid"`
+	AnnouncementDesc       string `json:"announcement_desc"`
+	ScheduleAnnounce       string `json:"schedule_announce"`
+	ScheduleAnnounceExpire string `json:"schedule_announce_expire"`
+	AnnounceRepeat         int    `json:"announce_repeat"`
+	StatusID               int    `json:"status_id"`
+	ChannelID              int    `json:"channel_id"`
+}
+
+// for round
+type BroadcastRoundData struct {
+	Rounds []BroadcastRound `json:"rounds"`
+}
+
+type BroadcastRound struct {
+	ID        uint64    `json:"id"`
+	RoundNo   string    `json:"round_no"`
+	RoundUUID uuid.UUID `json:"round_uuid"`
+	StatusID  uint64    `json:"status_id"`
+	ChannelID uint64    `json:"channel_id"`
+}
+
+// for user notification
+type BroadcastUserNotificationData struct {
+	Notifications []BroadcastUserNotification `json:"user_notifications"`
+}
+type BroadcastUserNotification struct {
+	UserUUID    uuid.UUID `json:"user_uuid"`
+	Context     string    `json:"context"`
+	Subject     string    `json:"subject"`
+	Description string    `json:"description"`
+	IconID      uint64    `json:"icon_id"`
+}
+
+// for bet limit
+type BroadcastBetLimitData struct {
+	BetLimts []BroadcastBetLimit `json:"bet_limits"`
+}
+type BroadcastBetLimit struct {
+	BetLimit     decimal.Decimal `json:"bet_limit"`
+	BetLimitUUID uuid.UUID       `json:"bet_limit_uuid"`
+	ChannelID    uint64          `json:"channel_id"`
+}
+
+// for announcement banner
+type BroadcastAnnouceBannerData struct {
+	Announcement AnnouncementBannerDetail `json:"announcement_banner"`
+}
+
+type AnnouncementBannerDetail struct {
+	TextEN    string `json:"text_en"`
+	TextZH    string `json:"text_zh"`
+	TextKM    string `json:"text_km"`
+	ChannelID int    `json:"channel_id"`
+}
+
+type BroadcastTotalBetData struct {
+	Bet []BroadcastTotalBet `json:"bet"`
+}
+type BroadcastTotalBet struct {
+	BetTypeID      uint64          `json:"bet_type_id"`
+	TotalBetAmount decimal.Decimal `json:"total_bet_amount"`
+	CurrencyID     uint64          `json:"currency_id"`
+	ChannelID      uint64          `json:"channel_id"`
+	Date           string          `json:"date"`
+}
+
+type BroadcastTotalBetByRoundData struct {
+	PlayerBetNumber int                        `json:"player_bet_number"`
+	AdminBetNumber  int                        `json:"admin_bet_number"`
+	Bets            []BroadcastTotalBetByRound `json:"bets"`
+}
+type BroadcastTotalBetByRound struct {
+	ChannelID            uint64          `json:"channel_id"`
+	RoundUUID            string          `json:"round_uuid"`
+	CurrencyID           uint64          `json:"currency_id"`
+	BetTypeID            uint64          `json:"bet_type_id"`
+	TotalBetAmount       decimal.Decimal `json:"total_bet_amount"`
+	TotalPlayerBetAmount decimal.Decimal `json:"total_player_bet_amount"`
+	TotalAdminBetAmonunt decimal.Decimal `json:"total_admin_bet_amount"`
+}
+
+type BroadcastFightOddData struct {
+	FightOdd []FightOdd `json:"fight_odd"`
+}
+
+type FightOdd struct {
+	FightOddUUID string `json:"fight_odd_uuid"`
+	ChannelID    uint64 `json:"channel_id"`
+	RedOdd       string `json:"red_odd"`
+	BlueOdd      string `json:"blue_odd"`
+	DrawOdd      string `json:"draw_odd"`
+	StatusID     uint64 `json:"status_id"`
+}
+
+type BroadcastUpdateFightOddData struct {
+	UpdateFightOdd []UpdateFightOdd `json:"update_fight_odd"`
+}
+
+type UpdateFightOdd struct {
+	FightOddUUID uuid.UUID       `json:"fight_odd_uuid"`
+	ChannelID    uint64          `json:"channel_id"`
+	RedOdd       decimal.Decimal `json:"red_odd"`
+	BlueOdd      decimal.Decimal `json:"blue_odd"`
+	DrawOdd      decimal.Decimal `json:"draw_odd"`
+	StatusID     uint64          `json:"status_id"`
+}

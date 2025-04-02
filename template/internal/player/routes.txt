@@ -1,0 +1,40 @@
+package player
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// playerHandler struct
+type PlayerRoute struct {
+	app     *fiber.App
+	db      *pool.ConnectionPool
+	handler *PlayerHandler
+}
+
+func NewRoute(app *fiber.App, db *pool.ConnectionPool) *PlayerRoute {
+	handler := NewHandler(db)
+	return &PlayerRoute{
+		app:     app,
+		db:      db,
+		handler: handler,
+	}
+}
+
+func (u *PlayerRoute) RegisterPlayerRoute() *PlayerRoute {
+	v1 := u.app.Group("/api/v1/admin/")
+	player := v1.Group("/player")
+	player.Get("/", u.handler.Show)
+	player.Get("/:id", u.handler.ShowOne)
+	player.Post("/", u.handler.Create)
+	player.Put("/:id", u.handler.Update)
+	player.Delete("/:id", u.handler.Delete)
+	player.Get("/form/create", u.handler.GetPlayerFormCreate)
+	player.Get("/form/update/:id", u.handler.GetPlayerFormUpdate)
+	player.Put("/change/password/:id", u.handler.Update_Password)
+	player.Put("/bet/limit/:uuid", u.handler.UpdatePlayerBetLimit)
+	player.Post("/bet/limit", u.handler.SetPlayerBetLimit)
+	player.Put("status/:uuid", u.handler.UpdatePlayerStatus)
+	player.Put("status/bet/:uuid", u.handler.UpdatePlayerStatusAndBet)
+	return u
+}

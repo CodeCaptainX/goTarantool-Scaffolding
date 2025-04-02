@@ -1,0 +1,204 @@
+package watcher
+
+import (
+	"encoding/json"
+	"fmt"
+	ws "{{PROJECT_NAME}}/internal/admin/websocket"
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	"sync"
+	"time"
+
+	"github.com/fasthttp/websocket"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type RoundStatus struct {
+	ChannelID uint64
+	StatusID  uint64
+}
+
+// Global map to track timers per channel
+var channelTimers = make(map[int]*time.Timer)
+var timerMutex sync.Mutex
+var RoundsStatuses []RoundStatus
+
+func SubscribeBroadcastKey(connPool *pool.ConnectionPool) {
+	const key = "broadcast_global_data"
+	annouce_callback := func(event tarantool.WatchEvent) {
+		fmt.Printf("event connection: %s\n", event.Conn.Addr())
+		fmt.Printf("event key: %s\n", event.Key)
+		fmt.Printf("event value: %v\n", event.Value)
+		//get value from broadcast as a string
+		valueStr, ok := event.Value.(string)
+		if !ok {
+			fmt.Println("Error: event.Value is not a string")
+			return
+		}
+		//convert that string to become byte and unmarshal it into the broadcastResponse struct
+		var response types.BroadcastResponse
+		if err := json.Unmarshal([]byte(valueStr), &response); err != nil {
+			fmt.Println("Error unmarshalling JSON:", err)
+			return
+		}
+		//switch data type base on topic
+		var data interface{}
+		switch response.Topic {
+		case "announcement":
+			data = types.BroadcastAnnouceData{}
+		case "round_status":
+			data = &types.BroadcastRoundData{}
+		case "channel":
+			data = types.BroadcastChannelData{}
+		case "announcement_banner":
+			data = types.BroadcastAnnouceBannerData{}
+		case "fight_odd":
+			data = &types.BroadcastFightOddData{}
+		case "bet_limit":
+			data = &types.BroadcastBetLimitData{}
+		default:
+			fmt.Println("Broadcast data topic = ", response.Topic)
+		}
+
+		//after that unmarshal data feild from the BroadcastResponse into the BroadcastDat struct
+		if err := json.Unmarshal(response.Data, &data); err != nil {
+			fmt.Println("Error unmarshalling JSON :", err)
+			return
+		}
+
+		if response.Topic == "round_status" {
+			var round_data = data.(*types.BroadcastRoundData)
+			if len(round_data.Rounds) > 0 {
+				timerMutex.Lock()
+				exists := false
+				for i, rs := range RoundsStatuses {
+					if rs.ChannelID == round_data.Rounds[0].ChannelID {
+						RoundsStatuses[i].StatusID = round_data.Rounds[0].StatusID
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					RoundsStatuses = append(RoundsStatuses, RoundStatus{
+						ChannelID: round_data.Rounds[0].ChannelID,
+						StatusID:  round_data.Rounds[0].StatusID,
+					})
+				}
+				timerMutex.Unlock()
+			}
+		}
+
+		//mashal the entire response back to JSON format
+		responseJSON, err := json.Marshal(response)
+		if err != nil {
+			fmt.Println("Error sending message:", err)
+		}
+		// Now, loop through all connected WebSocket clients and send the broadcast
+		ws.ClientsMutex.Lock()
+		defer ws.ClientsMutex.Unlock()
+
+		for playerUuid, conn := range ws.Clients {
+			err := conn.WriteMessage(websocket.TextMessage, responseJSON)
+			if err != nil {
+				fmt.Printf("Error sending message to player %s: %v\n", playerUuid, err)
+			} else {
+				fmt.Printf("Message sent to player %s\n", playerUuid)
+			}
+		}
+	}
+	tarantool_utls.NewSubscribeWatcher(key, annouce_callback, connPool)
+
+	//listen to key that will only send to specifc connector on admin system only
+	const bet_key = "broadcast_admin_data"
+	bet_callback := func(event tarantool.WatchEvent) {
+		fmt.Printf("event connection: %s\n", event.Conn.Addr())
+		fmt.Printf("event key: %s\n", event.Key)
+		fmt.Printf("event value: %v\n", event.Value)
+
+		// Get value from broadcast as a string
+		valueStr, ok := event.Value.(string)
+		if !ok {
+			fmt.Println("Error: event.Value is not a string")
+			return
+		}
+
+		// Convert that string to bytes and unmarshal it into the BroadcastResponse struct
+		var response types.BroadcastResponse
+		if err := json.Unmarshal([]byte(valueStr), &response); err != nil {
+			fmt.Println("Error unmarshalling JSON:", err)
+			return
+		}
+
+		// Declare a variable for the broadcast data
+		var data interface{}
+
+		// Switch data type based on the topic
+		switch response.Topic {
+		case "user_notification":
+			data = &types.BroadcastUserNotificationData{}
+			// case "total_bet":
+			// 	data = &types.BroadcastTotalBet{}
+			// case "total_bet_by_round":
+			// 	data = &types.BroadcastTotalBetByRound{}
+			// case "update_fight_odd":
+			// 	data = &types.BroadcastUpdateFightOddData{}
+			// default:
+			// 	fmt.Println("Broadcast data topic =", response.Topic)
+			// 	return // Exit if the topic is not recognized
+		}
+
+		// Unmarshal the data field from the BroadcastResponse into the appropriate struct
+		if err := json.Unmarshal(response.Data, &data); err != nil {
+			fmt.Println("Error unmarshalling data:", err)
+			return
+		}
+
+		// Handle the player_balance case specifically
+		if response.Topic == "user_notification" {
+			notifyData := data.(*types.BroadcastUserNotificationData) // Assert back to specific type
+			if len(notifyData.Notifications) > 0 {
+				targetUUID := notifyData.Notifications[0].UserUUID
+
+				ws.ClientsMutex.Lock()
+				defer ws.ClientsMutex.Unlock()
+
+				conn, exists := ws.Clients[targetUUID.String()]
+				if exists {
+					responseJSON, err := json.Marshal(response) // Marshal only the balance data
+					if err != nil {
+						fmt.Println("Error sending message:", err)
+					} else {
+						err = conn.WriteMessage(websocket.TextMessage, responseJSON)
+						if err != nil {
+							fmt.Printf("Error sending message to player %s: %v\n", targetUUID, err)
+						} else {
+							fmt.Printf("Message sent to player %s\n", targetUUID)
+						}
+					}
+				}
+			}
+		} else {
+			//mashal the entire response back to JSON format
+			responseJSON, err := json.Marshal(response)
+			if err != nil {
+				fmt.Println("Error sending message:", err)
+			}
+			// Now, loop through all connected WebSocket clients and send the broadcast
+			ws.ClientsMutex.Lock()
+			defer ws.ClientsMutex.Unlock()
+
+			for playerUuid, conn := range ws.Clients {
+				err := conn.WriteMessage(websocket.TextMessage, responseJSON)
+				if err != nil {
+					fmt.Printf("Error sending message to player %s: %v\n", playerUuid, err)
+				} else {
+					fmt.Printf("Message sent to player %s\n", playerUuid)
+				}
+			}
+		}
+
+	}
+	// Subscribe to the watcher
+	tarantool_utls.NewSubscribeWatcher(bet_key, bet_callback, connPool)
+}

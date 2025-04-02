@@ -1,0 +1,49 @@
+/**
+ * @Tarantool Database Init
+ *
+ **/
+
+package tarantool
+
+import (
+	//Standard
+	"context"
+	"fmt"
+	"time"
+
+	//External
+	tt "github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// New Tarantool connection with Pool
+func New(ip string, port int, user string, password string, pool_size int) (*pool.ConnectionPool, error) {
+	// Tarantool
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	dialer := tt.NetDialer{
+		Address:  fmt.Sprintf("%s:%d", ip, port),
+		User:     user,
+		Password: password,
+	}
+
+	// Explicit pool options
+	poolInstance := pool.Instance{
+		Name:   fmt.Sprintf("%s:%d", ip, port),
+		Dialer: dialer,
+		Opts: tt.Opts{
+			MaxReconnects: uint(pool_size),
+		},
+	}
+
+	// Connect to the pool
+	connPool, err := pool.Connect(ctx, []pool.Instance{poolInstance})
+	if err != nil {
+		fmt.Println("Failed to create connection pool:", err)
+		return nil, err
+	}
+	// defer connPool.Close()
+
+	return connPool, err
+}

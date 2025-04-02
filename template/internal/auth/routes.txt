@@ -1,0 +1,33 @@
+package auth
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// AuthHandler struct
+type AuthRoute struct {
+	app     *fiber.App
+	db      *pool.ConnectionPool
+	handler *AuthHandler
+}
+
+func NewRoute(app *fiber.App, db *pool.ConnectionPool) *AuthRoute {
+	handler := NewHandler(db)
+	return &AuthRoute{
+		app:     app,
+		db:      db,
+		handler: handler,
+	}
+}
+
+func (a *AuthRoute) RegisterAuthRoute() *AuthRoute {
+	mini_v1 := a.app.Group("api/v1/")
+	mini_v1.Post("/players/login_and_get_jwt", a.handler.MiniLogin)
+
+	v1 := a.app.Group("/api/v1/admin/")
+	auth := v1.Group("/auth")
+	auth.Post("/login", a.handler.Login)
+
+	return a
+}

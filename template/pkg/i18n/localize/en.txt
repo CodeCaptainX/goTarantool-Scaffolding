@@ -1,0 +1,57 @@
+{
+    "welcome": "Welcome!",
+    "welcomeWithName": "Hello, {{.name}}!",
+    "failed": "Failed",
+    "loginFailed": "Login Failed",
+    "login_failed": "Login Failed",
+    "loginSuccess": "Login Success",
+    "loginSessionMissing": "Login session missing",
+    "loginSessionInvalid": "Login `session id` invalid",
+    "jwtTokenInvalid": "Invalid token",
+    "getLoginSessionSuccess": "Get Login Session Success",
+    "getLoginSessionFailed": "Get Login Session failed",
+
+    "user_show_success": "Get user success",
+    "user_show_failed": "Get user success failed",
+    "user_showone_success": "Get user success",
+    "user_showone_failed": "Get user success failed",
+    "user_create_success": "Create new user Successfully",
+    "user_create_failed": "Failed create new user",
+    "user_update_success": "Update user successfully",
+    "user_update_failed": "Failed update new user",
+    "user_delete_success": "Failed update new user",
+    "user_delete_failed": "Failed update new user",
+    "user_create_form_success": "Get user create form success",
+    "user_create_form_failed": "Get user create form failed",
+    "user_update_form_success": "Get user create form success",
+    "user_update_form_failed": "Get user create form failed",
+
+    "player_show_success": "Get all players successfully",
+    "player_show_failed": "Get all players failed",
+    "player_showone_success": "Get all players successfully",
+    "player_showone_failed": "Get all players failed",
+    "player_not_found": "Player not found",
+    "player_create_success": "Creating Player successfully",
+    "player_create_failed": "Creating Player failed",
+    "player_update_success": "Updating Player successfully",
+    "player_update_failed": "Updating Player failed",
+    "player_delete_success": "Deleting Player successfully ",
+    "player_delete_failed": "Deleting Player failed",
+    "player_create_form_success": "Creating player's Create-form successfully",
+    "player_create_form_failed": "Creating player's Create-form failed",
+    "player_update_form_failed": "Updating player's form failed",
+    "player_update_form_success": "Updating player's form successfully",
+
+
+    "user_update_password_failed": "Failed to update password",
+    "user_update_password_success": "Update password successfully",
+    "player_update_password_failed": "Failed to update password",
+    "player_update_password_success": "Update password successfully",
+
+    "users_audits_show_success" : "The user's audit data has been successfully retrieved",
+
+    "users_audits_show_failed" : "Failed to retrieve the user's audit data",
+
+    "get_userinfo_success" : "User information retrieved successfully",
+    "get_userinfo_failed" : "Failed to retrieve user information"
+}

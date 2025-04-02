@@ -1,0 +1,101 @@
+package user_audit
+
+import (
+	"fmt"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+
+	// "fmt"
+
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type UserAuditRepo interface {
+	Show(audit_req AuditShowRequest) (*UserAuditResponse, *responses.ErrorResponse)
+}
+
+type UserAuditRepoImpl struct {
+	userCtx *types.UserContext
+	dbPool  *pool.ConnectionPool
+}
+
+func NewUserAuditRepoImpl(u *types.UserContext, db *pool.ConnectionPool) *UserAuditRepoImpl {
+	return &UserAuditRepoImpl{
+		userCtx: u,
+		dbPool:  db,
+	}
+}
+
+func (ua *UserAuditRepoImpl) Show(audit_req AuditShowRequest) (*UserAuditResponse, *responses.ErrorResponse) {
+	//prepae paging option
+	var per_page = audit_req.PageOptions.Perpage
+	var page = audit_req.PageOptions.Page
+	var offset = (page - 1) * per_page
+	var sql_limit = fmt.Sprintf(" LIMIT %d OFFSET %d ", per_page, offset)
+
+	// preapre order by
+	var sql_orderby = tarantool_utls.BuildSQLSort(audit_req.Sorts)
+
+	// prepare filter
+	sql_filter, args_filter := tarantool_utls.BuildSQLFilter(audit_req.Filters)
+	if len(args_filter) > 0 {
+		sql_filter = " AND " + sql_filter
+	}
+
+	// prepare sql
+	var sql = tarantool.NewExecuteRequest(
+		fmt.Sprintf(`
+			SELECT
+				id, user_audit_uuid, user_id, user_audit_context, user_audit_desc, audit_type_id,
+				user_agent, operator, ip, status_id, "order", created_by, created_at, updated_by,
+				updated_at, deleted_by, deleted_at
+			FROM
+				users_audits_space
+			WHERE deleted_at IS NULL %s%s%s`, sql_filter, sql_orderby, sql_limit),
+	).Args(args_filter)
+
+	var sql_total = tarantool.NewExecuteRequest(
+		fmt.Sprintf(`
+			SELECT
+				COUNT(*) as total
+			FROM 
+				users_audits_space
+			WHERE deleted_at IS NULL %s`, sql_filter),
+	).Args(args_filter)
+
+	// get users audits space
+	var users_audits []UserAudit
+	resp, err := ua.dbPool.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("users_audits_show_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("users_audits_show_failed", fmt.Errorf("cannot get select user audit database error"))
+	}
+
+	err = resp.DecodeTyped(&users_audits)
+	if err != nil {
+		custom_log.NewCustomLog("users_audits_show_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("users_audits_show_failed", fmt.Errorf("cannot decode select user audit"))
+	}
+
+	var total []TotalRecord
+	total_resp, err := ua.dbPool.Do(sql_total, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("users_audits_show_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("users_audits_show_failed", fmt.Errorf("cannot select total user audit database error"))
+	}
+
+	err = total_resp.DecodeTyped(&total)
+	if err != nil {
+		custom_log.NewCustomLog("users_audits_show_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("users_audits_show_failed", fmt.Errorf("cannot decode total user audit"))
+	}
+
+	return &UserAuditResponse{UserAudits: users_audits, Total: total[0].Total}, nil
+}

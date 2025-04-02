@@ -1,0 +1,20 @@
+package constants
+
+const (
+	PlayerCreateSuccess              = 9000
+	PlayerCreateFailed               = 9001
+	PlayerDeleteSuccess              = 9002
+	PlayerDeleteFailed               = 9003
+	PlayerShowSuccess                = 9004
+	PlayerShowFailed                 = 9005
+	PlayerShowOneSuccess             = 9006
+	PlayerShowOneFailed              = 9007
+	PlayerUpdateSuccess              = 9008
+	PlayerUpdateFailed               = 9009
+	PlayerGetPlayerFormCreateSuccess = 9010
+	PlayerGetPlayerFormCreateFailed  = 9011
+	PlayerGetPlayerFormUpdateSuccess = 9012
+	PlayerGetPlayerFormUpdateFailed  = 9013
+	PlayerUpdate_PasswordSuccess     = 9014
+	PlayerUpdate_PasswordFailed      = 9015
+)

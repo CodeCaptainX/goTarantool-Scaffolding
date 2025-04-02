@@ -1,0 +1,563 @@
+package user
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	"{{PROJECT_NAME}}/pkg/utls"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	"github.com/tarantool/go-tarantool/v2/decimal"
+	_ "github.com/tarantool/go-tarantool/v2/uuid"
+)
+
+type UserContext struct {
+	// Id           int
+	UserUuid     string
+	UserName     string
+	LoginSession string
+	Exp          time.Time
+}
+
+func NewUserContext( /*userId int,*/ userUuid string, userName string, loginSession string, exp time.Time) *UserContext {
+	return &UserContext{
+		// Id:           userId,
+		UserUuid:     userUuid,
+		UserName:     userName,
+		LoginSession: loginSession,
+		Exp:          exp,
+	}
+}
+
+type User struct {
+	ID           uint64             `json:"-"`
+	UserUUID     uuid.UUID          `json:"user_uuid"`
+	FirstName    string             `json:"first_name"`
+	LastName     string             `json:"last_name"`
+	UserName     string             `json:"user_name"`
+	Email        string             `json:"email"`
+	RoleId       int                `json:"role_id"`
+	Role         string             `json:"role_name"`
+	Status       bool               `json:"status"`
+	LoginSession *string            `json:"login_session"`  // Using a pointer to handle nullable fields
+	ProfilePhoto *string            `json:"profile_photo"`  // Using a pointer to handle nullable fields
+	UserAlias    *string            `json:"user_alias"`     // Using a pointer to handle nullable fields
+	PhoneNumber  *string            `json:"phone_number"`   // Using a pointer to handle nullable fields
+	UserAvatarID *float64           `json:"user_avatar_id"` // Using a pointer to handle nullable fields
+	Commission   decimal.Decimal    `json:"commission"`
+	StatusId     uint64             `json:"status_id"`
+	Order        uint64             `json:"order"`
+	CreatedBy    uint64             `json:"-"`
+	Creator      string             `json:"creator"`
+	CreatedAt    datetime.Datetime  `json:"created_at"`
+	UpdatedBy    *uint64            `json:"-"` // Using a pointer to handle nullable fields
+	UpdatedAt    *datetime.Datetime `json:"-"` // Using a pointer to handle nullable fields
+	DeletedBy    *uint64            `json:"-"` // Using a pointer to handle nullable fields
+	DeletedAt    *datetime.Datetime `json:"-"` // Using a pointer to handle nullable fields
+}
+
+type UserAddModel struct {
+	ID           uint64
+	UserUUID     uuid.UUID
+	FirstName    string
+	LastName     string
+	UserName     string
+	Password     string
+	ChannelIds   string
+	Email        string
+	RoleId       int
+	Status       bool
+	LoginSession *string
+	ProfilePhoto *string
+	UserAlias    *string
+	PhoneNumber  *string
+	UserAvatarID *float64
+	Commission   decimal.Decimal
+	StatusId     uint64
+	Order        uint64
+	CreatedBy    uint64
+	CreatedAt    datetime.Datetime
+}
+
+func (u User) MarshalJSON() ([]byte, error) {
+	data, err := tarantool_utls.ToTarantoolDateTime(u)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
+}
+
+type UserNewRequest struct {
+	FirstName       string          `json:"first_name" validate:"required"`
+	LastName        string          `json:"last_name" validate:"required"`
+	UserName        string          `json:"user_name" validate:"required"`
+	Password        string          `json:"password"  validate:"required,min=6"`
+	PasswordConfirm string          `json:"password_confirm"  validate:"required,min=6"`
+	Email           string          `json:"email"  validate:"required,email"`
+	RoleId          int             `json:"role_id"  validate:"required"`
+	PhoneNumber     *string         `json:"phone_number"  validate:"required"`
+	Commission      decimal.Decimal `json:"commission"`
+	ChannelIDs      string          `json:"channel_ids" validation:"required"`
+}
+
+func (r *UserNewRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+	// Trim spaces from FirstName and LastName and check other neccessary
+	r.FirstName = strings.TrimSpace(r.FirstName)
+	r.LastName = strings.TrimSpace(r.LastName)
+	r.Email = strings.TrimSpace(r.Email)
+	r.UserName = strings.TrimSpace(r.UserName)
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	//Check confirm password
+	if r.Password != r.PasswordConfirm {
+		return fmt.Errorf("confirm password not match")
+	}
+
+	return nil
+}
+
+// user.cTx
+func (u *UserAddModel) New(usreq UserNewRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+	//check create role
+	if usctx.RoleId > uint64(usreq.RoleId) {
+		return fmt.Errorf("permission denied : you can't create a user that have bigger role than u")
+	}
+	//Generate user UUID
+	uid, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+
+	//Generate login_session
+	uid_session, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	sessionString := uid_session.String()
+
+	//Get user logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+	//Get next user id from Tarantool sequences
+	id, err_seq := tarantool_utls.GetSeqNextVal("seq_user_id", dbstream)
+	if err_seq != nil {
+		return err_seq
+	}
+
+	//Check if username exits
+	is_username, err_seq := tarantool_utls.IsExists("users_space", "user_name", usreq.UserName, dbstream)
+	if err_seq != nil {
+		return err_seq
+	} else {
+		if is_username {
+			return fmt.Errorf(fmt.Sprintf("username:`%s` already exists", usreq.UserName))
+		}
+	}
+
+	if strings.TrimSpace(usreq.ChannelIDs) == "" {
+		return fmt.Errorf("channelids cannot be empty")
+	}
+
+	photo := "user2.png"
+	u.ID = uint64(*id)
+	u.UserUUID = uid
+	u.FirstName = usreq.FirstName
+	u.LastName = usreq.LastName
+	u.UserName = usreq.UserName
+	u.Password = usreq.Password
+	u.Email = usreq.Email
+	u.ChannelIds = usreq.ChannelIDs
+	u.RoleId = usreq.RoleId
+	u.Status = true
+	u.LoginSession = &sessionString
+	u.ProfilePhoto = &photo
+	u.UserAlias = &usreq.UserName
+	u.PhoneNumber = usreq.PhoneNumber
+	u.UserAvatarID = nil
+	u.Commission = usreq.Commission
+	u.StatusId = 1
+	u.Order = u.ID
+	u.CreatedBy = uint64(*by_id)
+	u.CreatedAt = now
+	return nil
+}
+
+type UserUpdateRequest struct {
+	FirstName   string          `json:"first_name" validate:"required"`
+	LastName    string          `json:"last_name" validate:"required"`
+	Email       string          `json:"email"  validate:"required,email"`
+	RoleId      int             `json:"role_id"  validate:"required"`
+	PhoneNumber *string         `json:"phone_number"  validate:"required"`
+	Commission  decimal.Decimal `json:"commission"`
+	StatusId    int             `json:"status_id"  validate:"required"`
+}
+
+func (r *UserUpdateRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+	// Trim spaces from FirstName and LastName and check other neccessary
+	r.FirstName = strings.TrimSpace(r.FirstName)
+	r.LastName = strings.TrimSpace(r.LastName)
+	r.Email = strings.TrimSpace(r.Email)
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type UserUpdateModel struct {
+	ID           uint64
+	UserUUID     uuid.UUID
+	FirstName    string
+	LastName     string
+	UserName     string
+	Password     string
+	Email        string
+	RoleId       int
+	Status       bool
+	LoginSession *string
+	ProfilePhoto *string
+	UserAlias    *string
+	PhoneNumber  *string
+	UserAvatarID *float64
+	Commission   decimal.Decimal
+	StatusId     uint64
+	Order        uint64
+	UpdatedBy    uint64
+	UpdatedAt    datetime.Datetime
+}
+
+func (u *UserUpdateModel) New(user_uuid uuid.UUID, usreq UserUpdateRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+	// check permission
+	isYours, err := tarantool_utls.IsExistsWhere(
+		"users_space",
+		"user_uuid = $1 AND user_name = $2",
+		[]interface{}{user_uuid, usctx.UserName},
+		dbstream,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot check permission on user")
+	} else {
+		if isYours {
+			return fmt.Errorf("you cannot update your own information")
+		}
+	}
+	if usctx.RoleId > uint64(usreq.RoleId) {
+		return fmt.Errorf("permission denied : you can't update a user that have bigger or equal role to you")
+	}
+
+	//Check if user uuid exits
+	is_useruuid, err_seq := tarantool_utls.IsExists("users_space", "user_uuid", user_uuid, dbstream)
+	if err_seq != nil {
+		return err_seq
+	} else {
+		if !is_useruuid {
+			return fmt.Errorf(fmt.Sprintf("user uuid:`%s` not found dddd", user_uuid))
+		}
+	}
+
+	//Get user logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get user logined id
+	id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", user_uuid.String(), dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+
+	u.ID = uint64(*id)
+	u.UserUUID = user_uuid
+	u.FirstName = usreq.FirstName
+	u.LastName = usreq.LastName
+	u.Email = usreq.Email
+	u.RoleId = usreq.RoleId
+	u.PhoneNumber = usreq.PhoneNumber
+	u.Commission = usreq.Commission
+	u.StatusId = uint64(usreq.StatusId)
+	u.UpdatedBy = uint64(*by_id)
+	u.UpdatedAt = now
+	return nil
+}
+
+type UserResponse struct {
+	Users []User `json:"users"`
+	Total int    `json:"-"`
+}
+
+type TotalRecord struct {
+	Total int
+}
+type UserShowRequest struct {
+	PageOptions types.Paging   `json:"paging_options" query:"paging_options" validate:"required"`
+	Sorts       []types.Sort   `json:"sorts,omitempty" query:"sorts"`
+	Filters     []types.Filter `json:"filters,omitempty" query:"filters"`
+}
+
+func (r *UserShowRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.QueryParser(r); err != nil {
+		return err
+	}
+
+	//Fix bug `Filter.Value` nil when http query params failed parse to json type `interface{}`
+	for i := range r.Filters {
+		value := c.Query(fmt.Sprintf("filters[%d][value]", i))
+		if intValue, err := strconv.Atoi(value); err == nil {
+			r.Filters[i].Value = intValue
+		} else if boolValue, err := strconv.ParseBool(value); err == nil {
+			r.Filters[i].Value = boolValue
+		} else {
+			r.Filters[i].Value = value
+		}
+	}
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+type UserDeleteResponse struct {
+	Success bool `json:"success"`
+}
+type Role struct {
+	Id           uint64 `json:"id"`
+	UserRoleName string `json:"user_role_name"`
+}
+
+type UserCreateForm struct {
+	FirstName       string         `json:"first_name"`
+	LastName        string         `json:"last_name"`
+	UserName        string         `json:"user_name"`
+	Password        string         `json:"password"`
+	PasswordComfirm string         `json:"password_confirm"`
+	Email           string         `json:"email"`
+	RoleId          int            `json:"role_id"`
+	PhoneNumber     string         `json:"phone_number"`
+	StatusId        uint64         `json:"status_id"`
+	Status          []types.Status `json:"status"`
+	Roles           []Role         `json:"roles"`
+}
+type UserFormCreateResponse struct {
+	Users []UserCreateForm `json:"users"`
+}
+
+type UserUpdateForm struct {
+	FirstName   string          `json:"first_name"`
+	LastName    string          `json:"last_name"`
+	UserName    string          `json:"user_name"`
+	Email       string          `json:"email"`
+	RoleId      int             `json:"role_id"`
+	PhoneNumber string          `json:"phone_number"`
+	StatusId    uint64          `json:"status_id"`
+	Commission  decimal.Decimal `json:"commission"`
+	Status      []types.Status  `json:"status"`
+	Roles       []Role          `json:"roles"`
+}
+type UserFormUpdateResponse struct {
+	Users []UserUpdateForm `json:"users"`
+}
+
+type UserUpdatePasswordReponse struct {
+	Success bool `json:"success"`
+}
+type UserUpdatePasswordModel struct {
+	UserUUID  uuid.UUID
+	Password  string `json:"password" validate:"required,min=6"`
+	UpdatedBy uint64
+	UpdatedAt datetime.Datetime
+}
+type UserUpdatePasswordRequest struct {
+	OldPassword     string `json:"old_password" validate:"required"`
+	Password        string `json:"password" validate:"required,min=6"`
+	PasswordConfirm string `json:"password_confirm" validate:"required,min=6"`
+}
+
+func (r *UserUpdatePasswordRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	// Parse the request body into the UserUpdatePasswordRequest struct
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+
+	// Trim spaces from the password fields
+	r.OldPassword = strings.TrimSpace(r.OldPassword)
+	r.Password = strings.TrimSpace(r.Password)
+	r.PasswordConfirm = strings.TrimSpace(r.PasswordConfirm)
+
+	// Validate the struct fields
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	// Check if the new password matches the confirmation password
+	if r.Password != r.PasswordConfirm {
+		return fmt.Errorf("confirm password does not match")
+	}
+
+	return nil
+}
+
+func (u *UserUpdatePasswordModel) New(user_uuid uuid.UUID, usreq UserUpdatePasswordRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+
+	//Check if user uuid exits
+	is_useruuid, err_seq := tarantool_utls.IsExists("users_space", "user_uuid", user_uuid, dbstream)
+	if err_seq != nil {
+		return err_seq
+	} else {
+		if !is_useruuid {
+
+			return fmt.Errorf("user update by uuid:`%s` not found dddd", user_uuid)
+		}
+	}
+
+	//Get user logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	// Prepare the SQL query to check if the old password exists
+	sql := tarantool.NewExecuteRequest(
+		`SELECT password FROM users_space WHERE user_uuid = ?`).Args([]interface{}{user_uuid})
+
+	// Execute the query using dbPool
+	resp, err := dbstream.Do(sql).GetResponse()
+	if err != nil {
+		return fmt.Errorf("failed to execute query: %w", err)
+	}
+
+	// Define a struct to hold the old password
+	type OldPassword struct {
+		Password string `json:"password"`
+	}
+
+	// Decode the response data into the appropriate type
+	var oldPasswords []OldPassword
+	err = resp.DecodeTyped(&oldPasswords)
+	if err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Check if the old password was found
+	if len(oldPasswords) == 0 {
+		return fmt.Errorf("cant fint the old password")
+	}
+
+	// Check if the new password matches the confirmation password
+	if usreq.OldPassword != oldPasswords[0].Password {
+		return fmt.Errorf("cant fint the old password")
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+	fmt.Println(user_uuid)
+	u.Password = usreq.Password
+	u.UserUUID = user_uuid
+	u.UpdatedBy = uint64(*by_id)
+	u.UpdatedAt = now
+	return nil
+}
+
+type UserInfo struct {
+	ID           uint64          `json:"-"`
+	UserUUID     uuid.UUID       `json:"user_uuid"`
+	FirstName    string          `json:"first_name"`
+	LastName     string          `json:"last_name"`
+	UserName     string          `json:"user_name"`
+	Email        string          `json:"email"`
+	RoleId       int             `json:"role_id"`
+	RoleName     string          `json:"role_name"`
+	Status       bool            `json:"status"`
+	LoginSession *string         `json:"login_session"`
+	ProfilePhoto *string         `json:"profile_photo"`
+	UserAlias    *string         `json:"user_alias"`
+	PhoneNumber  *string         `json:"phone_number"`
+	UserAvatarID *float64        `json:"user_avatar_id"`
+	Commission   decimal.Decimal `json:"commission"`
+	StatusId     uint64          `json:"status_id"`
+}
+
+type UserBasicInfo struct {
+	UserInfo       UserInfo       `json:"user_info"`
+	UserPermission UserPermission `json:"user_permission"`
+}
+
+type UserPermission struct {
+	Modules map[string][]string `json:"modules"`
+}
+
+func (u UserBasicInfo) MarshalJSON() ([]byte, error) {
+	data, err := tarantool_utls.ToTarantoolDateTime(u)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
+}
+
+type UserBasicInfoResponse struct {
+	UserBasicInfo UserBasicInfo `json:"user_basic_info"`
+}
+
+type Permission struct {
+	ModuleName  string `json:"module_name"`
+	FunctionIDs string `json:"function_ids"`
+}

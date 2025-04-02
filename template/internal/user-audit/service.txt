@@ -1,0 +1,47 @@
+package user_audit
+
+import (
+	"fmt"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/middlewares"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type UserAuditCreator interface {
+	Show(audit_req AuditShowRequest) (*UserAuditResponse, *responses.ErrorResponse)
+}
+
+type UserAuditService struct {
+	userCtx       *types.UserContext
+	dbPool        *pool.ConnectionPool
+	userAuditRepo UserAuditRepo
+}
+
+func NewUserAuditService(u *types.UserContext, db *pool.ConnectionPool) *UserAuditService {
+	r := NewUserAuditRepoImpl(u, db)
+	return &UserAuditService{
+		userCtx:       u,
+		dbPool:        db,
+		userAuditRepo: r,
+	}
+}
+
+func (ua *UserAuditService) checkPermission(function_id string) *responses.ErrorResponse {
+	if !middlewares.HasPermission(ua.userCtx.RoleId, "user_audit", function_id, ua.dbPool) {
+		custom_log.NewCustomLog("permission_denied", "Permission denied", "error")
+		err_msg := &responses.ErrorResponse{}
+		return err_msg.NewErrorResponse("permission_denied", fmt.Errorf("permission denied"))
+	}
+	return nil
+}
+
+func (ua *UserAuditService) Show(audit_req AuditShowRequest) (*UserAuditResponse, *responses.ErrorResponse) {
+	if err := ua.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := ua.userAuditRepo.Show(audit_req)
+	return success, err
+}

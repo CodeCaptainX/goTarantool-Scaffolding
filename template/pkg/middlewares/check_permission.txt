@@ -1,0 +1,60 @@
+package middlewares
+
+import (
+	types "{{PROJECT_NAME}}/pkg/share"
+	"strings"
+
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// we assume
+// 1 : read
+// 2 : write
+// 3 : edit
+// 4 : delete
+func HasPermission(role_id uint64, module_name string, function_id string, conn *pool.ConnectionPool) bool {
+	if role_id == 1 {
+		return true //fix role admin
+	}
+	// prepare sql
+	var sql = tarantool.NewExecuteRequest(`
+		SELECT 
+			rrm.function_ids
+		FROM 
+			rel_roles_modules_space rrm
+		WHERE 
+			rrm.role_id = $1
+			AND rrm.module_id = (
+				SELECT m.id 
+				FROM modules_space m 
+				WHERE m.module_name = $2
+			)
+			AND rrm.deleted_at IS NULL
+	`).Args([]interface{}{role_id, module_name})
+
+	//execute request
+	var functionIDs []types.FieldFunctionIds
+	resp, err := conn.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		return false
+	}
+	if err = resp.DecodeTyped(&functionIDs); err != nil {
+		return false
+	}
+
+	// check if query get data or not
+	if len(functionIDs) == 0 || functionIDs[0].FunctionIDs == "" {
+		return false
+	}
+	// it will split the string by camma ex : "1,2,3" we will get ["1", "2", "3"]
+	ids := strings.Split(functionIDs[0].FunctionIDs, ",")
+	// check if that user have permission or not
+	for _, id := range ids {
+		if strings.TrimSpace(id) == strings.TrimSpace(function_id) {
+			return true
+		}
+	}
+
+	return false
+}

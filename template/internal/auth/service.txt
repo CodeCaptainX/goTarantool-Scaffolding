@@ -1,0 +1,41 @@
+package auth
+
+import (
+	"{{PROJECT_NAME}}/pkg/responses"
+
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type Authenticator interface {
+	LogIn(userName string, lastName string) (*AuthLoginResponse, *responses.ErrorResponse)
+	CheckSession(login_session string) (bool, *responses.ErrorResponse)
+	MiniLogin(mini_login_req MiniLoginRequest) (*MiniLoginResponse, *responses.ErrorResponse)
+}
+
+type AuthService struct {
+	dbPool   *pool.ConnectionPool
+	authRepo AuthRepo
+}
+
+func NewAuthService(db *pool.ConnectionPool) *AuthService {
+	r := NewAuthRepoImpl(db)
+	return &AuthService{
+		dbPool:   db,
+		authRepo: r,
+	}
+}
+
+func (a *AuthService) LogIn(userName string, password string) (*AuthLoginResponse, *responses.ErrorResponse) {
+	success, err := a.authRepo.LogIn(userName, password)
+	return success, err
+}
+
+func (a *AuthService) CheckSession(login_session string) (bool, *responses.ErrorResponse) {
+	success, err := a.authRepo.CheckSession(login_session)
+	return success, err
+}
+
+func (a *AuthService) MiniLogin(mini_login_req MiniLoginRequest) (*MiniLoginResponse, *responses.ErrorResponse) {
+	success, err := a.authRepo.MiniLogin(mini_login_req)
+	return success, err
+}

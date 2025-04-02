@@ -1,0 +1,82 @@
+package user_audit
+
+import (
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	"{{PROJECT_NAME}}/pkg/utls"
+	"encoding/json"
+	"fmt"
+	"strconv"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	_ "github.com/tarantool/go-tarantool/v2/uuid"
+)
+
+type UserAudit struct {
+	ID               uint64             `json:"-"`
+	UserAuditUUID    uuid.UUID          `json:"user_audit_uuid"`
+	UserId           uint64             `json:"user_id"`
+	UserAuditContext string             `json:"user_audit_context"`
+	UserAuditDesc    string             `json:"user_audit_desc"`
+	AuditTypeID      uint64             `json:"audit_type_id"`
+	UserAgent        string             `json:"user_agent"`
+	Operator         string             `json:"operator"`
+	Ip               string             `json:"ip"`
+	StatusId         uint64             `json:"status_id"`
+	Order            uint64             `json:"order"`
+	CreatedBy        uint64             `json:"-"`
+	CreatedAt        datetime.Datetime  `json:"created_at"`
+	UpdatedBy        *uint64            `json:"-"`
+	UpdatedAt        *datetime.Datetime `json:"-"`
+	DeletedBy        *uint64            `json:"-"`
+	DeletedAt        *datetime.Datetime `json:"-"`
+}
+
+func (ua UserAudit) MarshalJSON() ([]byte, error) {
+	data, err := tarantool_utls.ToTarantoolDateTime(ua)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
+}
+
+type UserAuditResponse struct {
+	UserAudits []UserAudit `json:"user_audits"`
+	Total      int         `json:"-"`
+}
+
+type AuditShowRequest struct {
+	PageOptions types.Paging   `json:"paging_options" query:"paging_options" validate:"required"`
+	Sorts       []types.Sort   `json:"sorts,omitempty" query:"sorts"`
+	Filters     []types.Filter `json:"filters,omitempty" query:"filters"`
+}
+
+func (ua *AuditShowRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.QueryParser(ua); err != nil {
+		return err
+	}
+
+	//Fix bug `Filter.Value` nil when http query params failed parse to json type `interface{}`
+	for i := range ua.Filters {
+		value := c.Query(fmt.Sprintf("filters[%d][value]", i))
+		if intValue, err := strconv.Atoi(value); err == nil {
+			ua.Filters[i].Value = intValue
+		} else if boolValue, err := strconv.ParseBool(value); err == nil {
+			ua.Filters[i].Value = boolValue
+		} else {
+			ua.Filters[i].Value = value
+		}
+	}
+
+	if err := v.Validate(ua); err != nil {
+		return err
+	}
+	return nil
+}
+
+type TotalRecord struct {
+	Total int
+}

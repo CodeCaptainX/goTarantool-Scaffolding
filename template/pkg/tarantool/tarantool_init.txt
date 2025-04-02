@@ -1,0 +1,29 @@
+package tarantool
+
+import (
+	"{{PROJECT_NAME}}/pkg/utls"
+	"os"
+)
+
+type TarantoolInit struct {
+	Host     string
+	Port     int
+	User     string
+	Pass     string
+	PoolSize int
+}
+
+func NewTarantoolConfig() *TarantoolInit {
+	tarantool_host := os.Getenv("TARANTOOL_HOST")
+	tarantool_port := utls.GetenvInt("TARANTOOL_PORT", 3301)
+	tarantool_user := os.Getenv("TARANTOOL_USER")
+	tarantool_pass := os.Getenv("TARANTOOL_PASS")
+	tarantool_pool := utls.GetenvInt("TARANTOOL_POOL", 10)
+	return &TarantoolInit{
+		Host:     tarantool_host,
+		Port:     tarantool_port,
+		User:     tarantool_user,
+		Pass:     tarantool_pass,
+		PoolSize: tarantool_pool,
+	}
+}

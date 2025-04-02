@@ -1,0 +1,1006 @@
+package player
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	"{{PROJECT_NAME}}/pkg/utls"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	"github.com/tarantool/go-tarantool/v2/decimal"
+	"github.com/tarantool/go-tarantool/v2/pool"
+	_ "github.com/tarantool/go-tarantool/v2/uuid"
+)
+
+type Player struct {
+	ID             uint64             `json:"-"`
+	PlayerUUID     uuid.UUID          `json:"player_uuid"`
+	FirstName      string             `json:"first_name"`
+	LastName       string             `json:"last_name"`
+	UserName       string             `json:"user_name"`
+	Email          string             `json:"email"`
+	LoginSession   *string            `json:"login_session,omitempty"`
+	ProfilePhoto   *string            `json:"profile_photo,omitempty"`
+	PlayerAlias    *string            `json:"player_alias,omitempty"`
+	PhoneNumber    *string            `json:"phone_number,omitempty"`
+	RoleId         int                `json:"role_id"`
+	PlayerAvatarID *float64           `json:"player_avatar_id,omitempty"`
+	Commission     decimal.Decimal    `json:"commission" default:"0.00"`
+	StatusID       *float64           `json:"status_id" default:"1"`
+	Order          *float64           `json:"order" default:"1"`
+	CreatedBy      uint64             `json:"-"`
+	CreatedAt      datetime.Datetime  `json:"created_at"`
+	UpdatedBy      *uint64            `json:"-"`
+	UpdatedAt      *datetime.Datetime `json:"updated_at"` // Using a pointer to handle nullable fields
+	DeletedBy      *uint64            `json:"-"`          // Using a pointer to handle nullable fields
+	DeletedAt      *datetime.Datetime `json:"-"`          // Using a pointer to handle nullable fields
+}
+type PlayerWithFullInfo struct {
+	ID                 uint64             `json:"-"`
+	PlayerUUID         uuid.UUID          `json:"player_uuid"`
+	FirstName          string             `json:"first_name"`
+	LastName           string             `json:"last_name"`
+	UserName           string             `json:"user_name"`
+	Email              string             `json:"email"`
+	LoginSession       *string            `json:"login_session,omitempty"`
+	ProfilePhoto       *string            `json:"profile_photo,omitempty"`
+	PlayerAlias        *string            `json:"player_alias,omitempty"`
+	PhoneNumber        *string            `json:"phone_number,omitempty"`
+	RoleId             int                `json:"role_id"`
+	PlayerBalances     []Player_Balance   `json:"player_balances"`
+	PlayerBetsSettings []PlayerBetSetting `json:"player_bets_settings"`
+	PlayerAvatarID     *float64           `json:"player_avatar_id,omitempty"`
+	Commission         decimal.Decimal    `json:"commission" default:"0.00"`
+	StatusID           *float64           `json:"status_id" default:"1"`
+	Order              *float64           `json:"order" default:"1"`
+	CreatedBy          uint64             `json:"-"`
+	CreatedAt          datetime.Datetime  `json:"created_at"`
+	UpdatedBy          *uint64            `json:"-"`
+	UpdatedAt          *datetime.Datetime `json:"updated_at"` // Using a pointer to handle nullable fields
+	DeletedBy          *uint64            `json:"-"`          // Using a pointer to handle nullable fields
+	DeletedAt          *datetime.Datetime `json:"-"`          // Using a pointer to handle nullable fields
+}
+
+type Player_Balance struct {
+	Balance       decimal.Decimal `json:"balance"`
+	Currency_ID   uint64          `json:"currency_id"`
+	Currency_code string          `json:"currency_code"`
+}
+
+type PlayerBetSetting struct {
+	PlayerBetLimitUUID uuid.UUID       `json:"player_bet_limit_uuid"`
+	MaxBetAmount       decimal.Decimal `json:"max_bet_amount"`
+	CurrencyID         uint64          `json:"currency_id"`
+	CurrencyCode       string          `json:"currency_code"`
+}
+
+func (p Player) MarshalJSON() ([]byte, error) {
+	data, err := tarantool_utls.ToTarantoolDateTime(p)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
+}
+func (p PlayerWithFullInfo) MarshalJSON() ([]byte, error) {
+	data, err := tarantool_utls.ToTarantoolDateTime(p)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
+}
+
+type PlayerAddModel struct {
+	ID             uint64            `json:"-"`
+	PlayerUUID     uuid.UUID         `json:"player_uuid"`
+	FirstName      string            `json:"first_name"`
+	LastName       string            `json:"last_name"`
+	UserName       string            `json:"user_name"`
+	Password       string            `json:"password"`
+	Email          string            `json:"email"`
+	LoginSession   *string           `json:"login_session,omitempty"`
+	ProfilePhoto   *string           `json:"profile_photo,omitempty"`
+	PlayerAlias    *string           `json:"player_alias,omitempty"`
+	PhoneNumber    string            `json:"phone_number,omitempty"`
+	PlayerAvatarID *float64          `json:"player_avatar_id,omitempty"`
+	Commission     decimal.Decimal   `json:"commission" default:"0.00"`
+	RoleId         int               `json:"role_id" default:"1"`
+	StatusID       int               `json:"status_id" default:"1"`
+	Order          uint64            `json:"order" default:"1"`
+	CreatedBy      uint64            `json:"created_by"`
+	CreatedAt      datetime.Datetime `json:"created_at"`
+}
+
+// player.cTx
+func (u *PlayerAddModel) New(playerReq PlayerNewRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+
+	//Generate player UUID
+	uid, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+
+	//Generate login_session
+	uid_session, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	sessionString := uid_session.String()
+
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+	//Get next player id from Tarantool sequences
+	id, err_seq := tarantool_utls.GetSeqNextVal("seq_player_id", dbstream)
+	if err_seq != nil {
+		return err_seq
+	}
+
+	//Check if username exits
+	is_username, err_seq := tarantool_utls.IsExists("players_space", "user_name", playerReq.UserName, dbstream)
+	if err_seq != nil {
+		return err_seq
+	} else {
+		if is_username {
+			return fmt.Errorf("username:`%s` already exists", playerReq.UserName)
+		}
+	}
+
+	u.ID = uint64(*id)
+	u.PlayerUUID = uid
+	u.FirstName = playerReq.FirstName
+	u.LastName = playerReq.LastName
+	u.UserName = playerReq.UserName
+	u.Password = playerReq.Password
+	u.Email = playerReq.Email
+
+	u.LoginSession = &sessionString
+	u.ProfilePhoto = nil
+	u.PlayerAlias = &playerReq.UserName
+	u.PhoneNumber = playerReq.PhoneNumber
+	u.RoleId = playerReq.RoleId
+	u.PlayerAvatarID = nil
+	u.Commission = playerReq.Commission
+	u.StatusID = 1
+	u.Order = u.ID
+	u.CreatedBy = uint64(*by_id)
+	u.CreatedAt = now
+	return nil
+}
+
+type PlayerUpdateModel struct {
+	ID             uint64            `json:"-"`
+	PlayerUUID     uuid.UUID         `json:"player_uuid"`
+	FirstName      string            `json:"first_name"`
+	LastName       string            `json:"last_name"`
+	UserName       string            `json:"user_name"`
+	Password       string            `json:"password"`
+	Email          string            `json:"email"`
+	LoginSession   *string           `json:"login_session,omitempty"`
+	ProfilePhoto   *string           `json:"profile_photo,omitempty"`
+	PlayerAlias    *string           `json:"player_alias,omitempty"`
+	PhoneNumber    *string           `json:"phone_number,omitempty"`
+	PlayerAvatarID *float64          `json:"player_avatar_id,omitempty"`
+	Commission     decimal.Decimal   `json:"commission" default:"0.00"`
+	RoleId         int               `json:"role_id"`
+	StatusID       uint64            `json:"status_id" default:"1"`
+	Order          *float64          `json:"order" default:"1"`
+	UpdatedBy      uint64            `json:"updated_by"` // Using a pointer to handle nullable fields
+	UpdatedAt      datetime.Datetime `json:"updated_at"` // Using a pointer to handle nullable fields
+}
+
+type PlayerUpdateRequest struct {
+	ID           uint64
+	FirstName    string          `json:"first_name" validate:"required"`
+	LastName     string          `json:"last_name" validate:"required"`
+	UserName     string          `json:"user_name" validate:"required"`
+	Email        string          `json:"email"  validate:"required,email"`
+	ProfilePhoto *string         `json:"profile_photo"  validate:"required"`
+	Commission   decimal.Decimal `json:"commission"  validate:"required"`
+	RoleId       int             `json:"role_id"`
+	StatusId     int             `json:"status_id"`
+	PhoneNumber  *string         `json:"phone_number"  validate:"required"`
+}
+
+func (r *PlayerUpdateRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+
+	// Trim spaces from FirstName and LastName and check other neccessary
+	r.FirstName = strings.TrimSpace(r.FirstName)
+	r.LastName = strings.TrimSpace(r.LastName)
+	r.Email = strings.TrimSpace(r.Email)
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (u *PlayerUpdateModel) New(player_uuid uuid.UUID, playerReq PlayerUpdateRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+
+	//Check if player uuid exits
+	is_playeruuid, err_seq := tarantool_utls.IsExists("players_space", "player_uuid ", player_uuid, dbstream)
+	if err_seq != nil {
+		return err_seq
+	} else {
+		if !is_playeruuid {
+			return fmt.Errorf("player uuid:`%s` not found", player_uuid)
+		}
+	}
+
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get player logined id
+	id, err := tarantool_utls.GetIdByUuid("players_space", "player_uuid", player_uuid.String(), dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+
+	u.ID = uint64(*id)
+	u.PlayerUUID = player_uuid
+	u.FirstName = playerReq.FirstName
+	u.LastName = playerReq.LastName
+	u.UserName = playerReq.UserName
+	u.Email = playerReq.Email
+	u.PhoneNumber = playerReq.PhoneNumber
+	u.PhoneNumber = playerReq.PhoneNumber
+	u.Commission = playerReq.Commission
+	u.RoleId = playerReq.RoleId
+	u.StatusID = uint64(playerReq.StatusId)
+	u.UpdatedBy = uint64(*by_id)
+	u.UpdatedAt = now
+	return nil
+}
+
+type PlayerResponse struct {
+	Players []Player `json:"players"`
+	Total   int      `json:"-"`
+}
+type PlayerResponseWithBalance struct {
+	Players []PlayerWithFullInfo `json:"players"`
+	Total   int                  `json:"-"`
+}
+
+type TotalRecord struct {
+	Total int
+}
+
+type PlayerShowRequest struct {
+	PageOptions types.Paging   `json:"paging_options" query:"paging_options" validate:"required"`
+	Sorts       []types.Sort   `json:"sorts,omitempty" query:"sorts"`
+	Filters     []types.Filter `json:"filters,omitempty" query:"filters"`
+}
+
+func (r *PlayerShowRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.QueryParser(r); err != nil {
+		return err
+	}
+
+	//Fix bug `Filter.Value` nil when http query params failed parse to json type `interface{}`
+	for i := range r.Filters {
+		value := c.Query(fmt.Sprintf("filters[%d][value]", i))
+		if intValue, err := strconv.Atoi(value); err == nil {
+			r.Filters[i].Value = intValue
+		} else if boolValue, err := strconv.ParseBool(value); err == nil {
+			r.Filters[i].Value = boolValue
+		} else {
+			r.Filters[i].Value = value
+		}
+	}
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+type PlayerNewRequest struct {
+	FirstName       string          `json:"first_name" validate:"required"`
+	LastName        string          `json:"last_name" validate:"required"`
+	UserName        string          `json:"user_name" validate:"required"`
+	Password        string          `json:"password"  validate:"required,min=6"`
+	PasswordConfirm string          `json:"password_confirm"  validate:"required,min=6"`
+	Email           string          `json:"email"  validate:"required,email"`
+	RoleId          int             `json:"role_id" default:"1"`
+	PhoneNumber     string          `json:"phone_number"  validate:"required"`
+	Commission      decimal.Decimal `json:"commission"  validate:"required"`
+}
+
+func (r *PlayerNewRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+	// Trim spaces from FirstName and LastName and check other neccessary
+	r.FirstName = strings.TrimSpace(r.FirstName)
+	r.LastName = strings.TrimSpace(r.LastName)
+	r.Email = strings.TrimSpace(r.Email)
+	r.UserName = strings.TrimSpace(r.UserName)
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	//Check confirm password
+	if r.Password != r.PasswordConfirm {
+		return fmt.Errorf("confirm password not match")
+	}
+
+	return nil
+}
+
+type UpdateDeleteResponse struct {
+	Success bool `json:"success"`
+}
+type Role struct {
+	Id             uint64 `json:"id"`
+	PlayerRoleName string `json:"player_role_name"`
+}
+type PlayerCreateForm struct {
+	FirstName       string         `json:"first_name"`
+	LastName        string         `json:"last_name"`
+	UserName        string         `json:"user_name"`
+	Password        string         `json:"password"`
+	PasswordConfirm string         `json:"password_confirm"`
+	Email           string         `json:"email"`
+	RoleId          int            `json:"role_id"`
+	PhoneNumber     string         `json:"phone_number"`
+	StatusId        uint64         `json:"status_id"`
+	Status          []types.Status `json:"status"`
+	Roles           []Role         `json:"roles"`
+}
+
+type PlayerFormCreateResponse struct {
+	Players []PlayerCreateForm `json:"players"`
+}
+
+type PlayerUpdateForm struct {
+	FirstName   string         `json:"first_name"`
+	LastName    string         `json:"last_name"`
+	UserName    string         `json:"user_name"`
+	Email       string         `json:"email"`
+	RoleId      int            `json:"role_id"`
+	PhoneNumber string         `json:"phone_number"`
+	StatusId    uint64         `json:"status_id"`
+	Status      []types.Status `json:"status"`
+	Roles       []Role         `json:"roles"`
+}
+type PlayerFormUpdateResponse struct {
+	Players []PlayerUpdateForm `json:"players"`
+}
+
+type PlayerUpdatePasswordReponse struct {
+	Success bool `json:"success"`
+}
+type PlayerUpdatePasswordModel struct {
+	playerUUID uuid.UUID
+	Password   string `json:"password" validate:"required,min=6"`
+	UpdatedBy  uint64
+	UpdatedAt  datetime.Datetime
+}
+type PlayerUpdatePasswordRequest struct {
+	OldPassword     string `json:"old_password" validate:"required"`
+	Password        string `json:"password" validate:"required,min=6"`
+	PasswordConfirm string `json:"password_confirm" validate:"required,min=6"`
+}
+
+func (r *PlayerUpdatePasswordRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	// Parse the request body into the PlayerUpdatePasswordModel struct
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+
+	// Trim spaces from the password fields
+	r.OldPassword = strings.TrimSpace(r.OldPassword)
+	r.Password = strings.TrimSpace(r.Password)
+	r.PasswordConfirm = strings.TrimSpace(r.PasswordConfirm)
+
+	// Validate the struct fields
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	//Check confirm password
+	if r.Password != r.PasswordConfirm {
+		return fmt.Errorf("confirm password not match")
+	}
+
+	return nil
+}
+
+func (u *PlayerUpdatePasswordModel) New(player_uuid uuid.UUID, playerReq PlayerUpdatePasswordRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+	// Prepare the SQL query to check if the old password exists
+	sql := tarantool.NewExecuteRequest(
+		`SELECT password FROM players_space WHERE player_uuid = ?`).Args([]interface{}{
+		player_uuid,
+	})
+
+	// Execute the query using dbPool
+	resp, err := dbstream.Do(sql).GetResponse()
+	if err != nil {
+		return fmt.Errorf("failed to execute query: %w", err)
+	}
+
+	// Define a struct to hold the old password
+	type OldPassword struct {
+		Password string `json:"password"`
+	}
+
+	// Decode the response data into the appropriate type
+	var oldPasswords []OldPassword
+	err = resp.DecodeTyped(&oldPasswords)
+	if err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Check if the old password was found
+	if len(oldPasswords) == 0 {
+		return fmt.Errorf("cant fint the old password")
+
+	}
+	//Check if player uuid exits
+	is_playeruuid, err_seq := tarantool_utls.IsExists("players_space", "player_uuid", player_uuid, dbstream)
+	if err_seq != nil {
+		return err_seq
+	} else {
+		if !is_playeruuid {
+			return fmt.Errorf("player update by uuid:`%s` not found dddd", player_uuid)
+		}
+	}
+
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+
+	u.Password = playerReq.Password
+	u.playerUUID = player_uuid
+	u.UpdatedBy = uint64(*by_id)
+	u.UpdatedAt = now
+	return nil
+}
+
+type PlayerBetLimit struct {
+	ID                 uint64             `json:"-"`
+	PlayerBetLimitUUID uuid.UUID          `json:"player_bet_limit_uuid"`
+	PlayerID           uint64             `json:"player_id"`
+	MaxBetAmount       decimal.Decimal    `json:"max_bet_amount"`
+	CurrencyID         uint64             `json:"currency_id"`
+	StatusID           uint64             `json:"status_id"`
+	Order              uint64             `json:"order"`
+	CreatedBy          uint64             `json:"-"`
+	CreatedAt          datetime.Datetime  `json:"created_at"`
+	UpdatedBy          *uint64            `json:"-"`
+	UpdatedAt          *datetime.Datetime `json:"updated_at"`
+	DeletedBy          *uint64            `json:"-"`
+	DeletedAt          *datetime.Datetime `json:"-"`
+}
+
+func (bl PlayerBetLimit) MarshalJSON() ([]byte, error) {
+	data, err := tarantool_utls.ToTarantoolDateTime(bl)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
+}
+
+type PlayerBetLimitResponse struct {
+	PlayersBetsLimits []PlayerBetLimit `json:"players_bets_limits"`
+}
+
+type UpdateBetLimitRequest struct {
+	MaxBetAmount string `json:"max_bet_amount" validate:"required"`
+}
+
+func (bl *UpdateBetLimitRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+	if err := c.BodyParser(bl); err != nil {
+		return err
+	}
+
+	if err := v.Validate(bl); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type BetLimitUpdateModel struct {
+	MaxBetAmount decimal.Decimal
+	UpdatedBy    uint64
+	UpdateAt     datetime.Datetime
+}
+
+func (bl *BetLimitUpdateModel) New(player_bet_limit_uuid uuid.UUID, bet_limit_set_req UpdateBetLimitRequest, uCtx *types.UserContext, dbPool *pool.ConnectionPool) error {
+	// get user context id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", uCtx.UserUuid, dbPool)
+	if err != nil {
+		return fmt.Errorf("cannot get user id : %w", err)
+	}
+
+	// make string to decimal
+	max_bet_decimal, err := decimal.MakeDecimalFromString(bet_limit_set_req.MaxBetAmount)
+	if err != nil {
+		return fmt.Errorf("cannot make decimal : %w", err)
+	}
+
+	// get current os time now
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return fmt.Errorf("cannot make datetime : %w", err)
+	}
+
+	bl.MaxBetAmount = max_bet_decimal
+	bl.UpdatedBy = uint64(*by_id)
+	bl.UpdateAt = now
+
+	return nil
+}
+
+type SetBetLimitRequest struct {
+	PlayerUUID   string `json:"player_uuid" validate:"required"`
+	MaxBetAmount string `json:"max_bet_amount" validate:"required"`
+	CurrencyID   uint64 `json:"currency_id"`
+}
+
+func (bl *SetBetLimitRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+	if err := c.BodyParser(bl); err != nil {
+		return err
+	}
+
+	if err := v.Validate(bl); err != nil {
+		return err
+	}
+	return nil
+}
+
+type SetBetLimitNewModel struct {
+	ID                 uint64
+	PlayerBetLimitUUID uuid.UUID
+	PlayerID           uint64
+	MaxBetAmount       decimal.Decimal
+	CurrencyID         uint64
+	StatusID           uint64
+	Order              uint64
+	CreatedBy          uint64
+	CreatedAt          datetime.Datetime
+}
+
+func (bl *SetBetLimitNewModel) New(set_bet_limit_req SetBetLimitRequest, uCtx *types.UserContext, dbPool *pool.ConnectionPool) error {
+	// get sequence next id
+	id, err := tarantool_utls.GetSeqNextVal("seq_player_bet_limit_id", dbPool)
+	if err != nil {
+		return fmt.Errorf("cannot get sequence next value : %w", err)
+	}
+
+	// get new generate uuid
+	uuid, err := uuid.NewV7()
+	if err != nil {
+		return fmt.Errorf("error generate new uuid : %w", err)
+	}
+
+	// get player id
+	player_id, err := tarantool_utls.GetIdByUuid("players_space", "player_uuid", set_bet_limit_req.PlayerUUID, dbPool)
+	if err != nil {
+		return fmt.Errorf("error get player id : %w", err)
+	} else {
+		if player_id == nil {
+			return fmt.Errorf("player is not exist")
+		}
+	}
+
+	// check is bet limit of that player exist (just in case will improve later)
+	is_exists, err := tarantool_utls.IsExists("players_bets_limits_space", "player_id", uint64(*player_id), dbPool)
+	if err != nil {
+		return fmt.Errorf("error check exist of player bet limit : %w", err)
+	} else {
+		if is_exists {
+			return fmt.Errorf("that player is already have bet limit")
+		}
+	}
+
+	// make decimal max bet limit
+	max_bet_decimal, err := decimal.MakeDecimalFromString(set_bet_limit_req.MaxBetAmount)
+	if err != nil {
+		return fmt.Errorf("error make decimal max bet limit : %w", err)
+	}
+
+	// get user context id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", uCtx.UserUuid, dbPool)
+	if err != nil {
+		return fmt.Errorf("error get user context id : %w", err)
+	}
+
+	// get current os time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("error load location : %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return fmt.Errorf("error make tarantool time : %w", err)
+	}
+
+	bl.ID = uint64(*id)
+	bl.PlayerBetLimitUUID = uuid
+	bl.PlayerID = uint64(*player_id)
+	bl.MaxBetAmount = max_bet_decimal
+	bl.CurrencyID = 1
+	bl.StatusID = 1
+	bl.Order = uint64(*id)
+	bl.CreatedBy = uint64(*by_id)
+	bl.CreatedAt = now
+
+	return nil
+}
+
+// UPDATE PLAYER STATUS
+type PlayerStatusUpdateModel struct {
+	ID           uint64            `json:"id"`
+	StatusID     uint64            `json:"status_id" default:"1"`
+	LoginSession string            `json:"login_session"`
+	UpdatedBy    uint64            `json:"updated_by"`
+	UpdatedAt    datetime.Datetime `json:"updated_at"`
+	StatusName   string
+}
+
+type PlayerStatusUpdateResponse struct {
+	StatusName     string
+	PlayerResponse PlayerResponse
+}
+
+func (ps *PlayerStatusUpdateModel) New(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest, usctx *types.UserContext, dbstream *tarantool.Stream) error {
+	//Get player logined id
+	id, err := tarantool_utls.GetIdByUuid("players_space", "player_uuid", player_uuid.String(), dbstream)
+	if err != nil {
+		return err
+	} else {
+		if id == nil {
+			return fmt.Errorf("player uuid:`%s` not found", player_uuid)
+		}
+	}
+
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbstream)
+	if err != nil {
+		return err
+	}
+
+	//Get status name
+	status_name := PlayerStatusName(uint64(psreq.StatusId))
+
+	// fmt.Printf("\n\n STATUS NAME: %s \n\n", status_name)
+
+	// Login session
+	login_session, _ := uuid.NewV7()
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+
+	ps.ID = uint64(*id)
+	ps.StatusID = uint64(psreq.StatusId)
+	ps.LoginSession = login_session.String()
+	ps.UpdatedBy = uint64(*by_id)
+	ps.UpdatedAt = now
+	ps.StatusName = status_name
+	// ps.LastRound = *LastRound
+
+	return nil
+}
+
+// --
+type PlayerStatusAndBetUpdateModel struct {
+	ID           uint64            `json:"id"`
+	StatusID     uint64            `json:"status_id" default:"1"`
+	LoginSession string            `json:"login_session"`
+	UpdatedBy    uint64            `json:"updated_by"`
+	UpdatedAt    datetime.Datetime `json:"updated_at"`
+	StatusName   string
+	LastRound    LastRoundResponse `json:"last_rounds"`
+	Bet          BetResponse
+}
+
+type PlayerStatusUpdateRequest struct {
+	StatusId int `json:"status_id"`
+}
+
+func (r *PlayerStatusUpdateRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func PlayerStatusName(satusId uint64) string {
+	switch satusId {
+	case 1:
+		return "Active"
+	case 2:
+		return "Pending"
+	case 3:
+		return "Restricted"
+	case 4:
+		return "Fraudulent"
+	default:
+		return "Unknown"
+	}
+}
+
+type LastRound struct {
+	ID        uint64 `json:"-"`
+	ChannelID uint64 `json:"channel_id"`
+}
+
+type LastRoundResponse struct {
+	LastRounds []LastRound `json:"last_rounds"`
+}
+
+type Bet struct {
+	UserName   string          `json:"user_name"`
+	RoundNo    string          `json:"round_no"`
+	CurrencyID uint64          `json:"currency_id"`
+	BetAmount  decimal.Decimal `json:"bet_amount"`
+	StatusID   uint64          `json:"status_id"`
+}
+
+type BetResponse struct {
+	Bets []Bet `json:"bets"`
+}
+
+type UpdatePlayerStatusAndBetResponse struct {
+	StatusName     string
+	PlayerResponse PlayerResponse
+	BetResponse    BetResponse
+}
+
+func GetLastRounds(dbPool *pool.ConnectionPool) (*LastRoundResponse, error) {
+	// Query to get the latest round for each channel (1, 2, 3)
+	var sql = tarantool.NewExecuteRequest(
+		`SELECT
+			MAX(r.id) AS id, r.channel_id
+		FROM rounds_space r
+		WHERE r.deleted_at IS NULL 
+		AND r.channel_id IN (1, 2, 3)  -- Filter for channels 1, 2, and 3
+		GROUP BY r.channel_id  -- Group by channel to get the latest round per channel
+		ORDER BY r.channel_id`,
+	)
+
+	var lastRounds []LastRound
+	resp, err := dbPool.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		return nil, err
+	}
+
+	err = resp.DecodeTyped(&lastRounds)
+	if err != nil {
+		return nil, err
+	}
+
+	// If no rounds are found, return an error
+	if len(lastRounds) == 0 {
+		return nil, fmt.Errorf("no rounds found")
+	}
+
+	// Return the response containing one last round for each channel
+	return &LastRoundResponse{LastRounds: lastRounds}, nil
+}
+
+func getBets(player_id uint64, last_rounds []LastRound, dbPool *pool.ConnectionPool) (*BetResponse, error) {
+	// Ensure there are rounds to query
+	if len(last_rounds) == 0 {
+		return nil, fmt.Errorf("no round IDs provided")
+	}
+
+	// Construct the SQL query with dynamic placeholders for round IDs
+	placeholders := make([]string, len(last_rounds))
+	args := make([]interface{}, len(last_rounds)+1)
+
+	for i, round := range last_rounds {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = round.ID
+	}
+
+	// Add player_id as the last argument
+	args[len(last_rounds)] = player_id
+
+	// Query to get bets for the given player in multiple rounds
+	query := fmt.Sprintf(`
+		SELECT p.user_name, r.round_no, b.currency_id, b.bet_amount, b.status_id
+		FROM bets_space b
+		LEFT JOIN rounds_space r ON r.id = b.round_id
+		LEFT JOIN players_space p ON p.id = b.player_id
+		WHERE b.deleted_at IS NULL
+		AND b.status_id = 1
+		AND b.round_id IN (%s)
+		AND b.player_id = $%d`, strings.Join(placeholders, ","), len(args))
+
+	// Execute query
+	sqlReq := tarantool.NewExecuteRequest(query).Args(args)
+
+	var bets []Bet
+	resp, err := dbPool.Do(sqlReq, pool.ANY).GetResponse()
+	if err != nil {
+		return nil, err
+	}
+
+	err = resp.DecodeTyped(&bets)
+	if err != nil {
+		return nil, err
+	}
+
+	// If no bets are found, return an error
+	if len(bets) == 0 {
+		return &BetResponse{Bets: []Bet{}}, nil
+	}
+
+	return &BetResponse{Bets: bets}, nil
+}
+
+func (ps *PlayerStatusAndBetUpdateModel) New(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest, usctx *types.UserContext, dbPool *pool.ConnectionPool) error {
+
+	LastRound, errLs := GetLastRounds(dbPool)
+	if errLs != nil {
+		return errLs
+	}
+	// fmt.Printf("\n\n >>>>>>>>>>>>>>>>>>>>>>> %d \n\n", LastRound)
+
+	//Get player logined id
+	id, err := tarantool_utls.GetIdByUuid("players_space", "player_uuid", player_uuid.String(), dbPool)
+	if err != nil {
+		return err
+	} else {
+		if id == nil {
+			return fmt.Errorf("player uuid:`%s` not found", player_uuid)
+		}
+	}
+
+	Bets, errBet := getBets(uint64(*id), LastRound.LastRounds, dbPool)
+	if errBet != nil {
+		return errBet
+	}
+
+	// fmt.Printf("\n\n📝 Player ID: '%d' - Retrieved Bets:\n", *id)
+	// for _, bet := range Bets.Bets {
+	// 	fmt.Printf("   ➤ Round: %s | Currency: %d | Bet Amount: %s | Status ID: %d Username %s \n", bet.RoundNo, bet.CurrencyID, bet.BetAmount.String(), bet.StatusID, bet.UserName)
+	// }
+	// fmt.Println()
+
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", usctx.UserUuid, dbPool)
+	if err != nil {
+		return err
+	}
+
+	//Get status name
+	status_name := PlayerStatusName(uint64(psreq.StatusId))
+
+	// fmt.Printf("\n\n STATUS NAME: %s \n\n", status_name)
+
+	// Login session
+	login_session, _ := uuid.NewV7()
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load location: %w", err)
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		return err
+	}
+
+	ps.ID = uint64(*id)
+	ps.StatusID = uint64(psreq.StatusId)
+	ps.LoginSession = login_session.String()
+	ps.UpdatedBy = uint64(*by_id)
+	ps.UpdatedAt = now
+	ps.StatusName = status_name
+	ps.LastRound = *LastRound
+	ps.Bet = *Bets
+
+	return nil
+}
+
+// WORK WITH MINI
+// ADD BET (Add bet and reduce balance)
+type AddBalanceOutstanding struct {
+	MemberLoginID string  `json:"member_login_id"`
+	GameID        int     `json:"game_id"`
+	RoundNo       string  `json:"round_no"`
+	CurrencyID    int     `json:"currency_id"`
+	Balance       float64 `json:"balance"`
+	Commission    int     `json:"commission"`
+	IsAutoClear   bool    `json:"is_auto_clear"`
+	AutoClearIn   int     `json:"auto_clear_in"`
+}
+
+type AddBalanceOutstandingResponse struct {
+	Success    bool                      `json:"success"`
+	Message    string                    `json:"message"`
+	StatusCode int                       `json:"status_code"`
+	Data       AddBalanceOutstandingData `json:"data"`
+}
+
+type AddBalanceOutstandingData struct {
+	OutstandingBalanceIDs []int `json:"outstanding_balance_ids"`
+}

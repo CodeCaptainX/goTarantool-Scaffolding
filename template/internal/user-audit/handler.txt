@@ -1,0 +1,77 @@
+package user_audit
+
+import (
+	"{{PROJECT_NAME}}/pkg/constants"
+	response "{{PROJECT_NAME}}/pkg/http/response"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	types "{{PROJECT_NAME}}/pkg/share"
+	"{{PROJECT_NAME}}/pkg/utls"
+	"net/http"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// UserHandler struct
+type UserAuditHandler struct {
+	db               *pool.ConnectionPool
+	userAuditService func(*fiber.Ctx) UserAuditCreator
+}
+
+func NewHandler(db *pool.ConnectionPool) *UserAuditHandler {
+	return &UserAuditHandler{
+		db: db,
+		userAuditService: func(c *fiber.Ctx) UserAuditCreator {
+			userContext := c.Locals("UserContext")
+			// fmt.Println("xxxxx", userContext)
+			var uCtx types.UserContext
+			// Convert map to UserContext struct
+			if contextMap, ok := userContext.(types.UserContext); ok {
+				uCtx = contextMap
+			} else {
+				custom_log.NewCustomLog("user_context_failed", "Failed to cast UserContext to map[string]interface{}", "warn")
+				uCtx = types.UserContext{}
+			}
+
+			// Pass uCtx to NewAuthService if needed
+			return NewUserAuditService(&uCtx, db)
+		},
+	}
+}
+
+func (ua *UserAuditHandler) Show(c *fiber.Ctx) error {
+	audit_req := AuditShowRequest{}
+
+	v := utls.NewValidator()
+	if err := audit_req.bind(c, v); err != nil {
+		return c.Status(http.StatusUnprocessableEntity).JSON(
+			response.NewResponseError(
+				utls.Translate("users_audits_show_failed", nil, c),
+				constants.UserAuditShowFailed,
+				err,
+			),
+		)
+	}
+
+	audit_resp, err := ua.userAuditService(c).Show(audit_req)
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(
+			response.NewResponseError(
+				utls.Translate(err.MessageID, nil, c),
+				constants.UserAuditShowFailed,
+				err.Err,
+			),
+		)
+	}
+
+	return c.Status(http.StatusOK).JSON(
+		response.NewResponseWithPaging(
+			utls.Translate("users_audits_show_success", nil, c),
+			constants.UserAuditShowSuccess,
+			audit_resp,
+			audit_req.PageOptions.Page,
+			audit_req.PageOptions.Perpage,
+			audit_resp.Total,
+		),
+	)
+}

@@ -1,0 +1,1036 @@
+package player
+
+import (
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	utls "{{PROJECT_NAME}}/pkg/utls"
+	"os"
+	"time"
+
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	_ "github.com/tarantool/go-tarantool/v2/decimal"
+	"github.com/tarantool/go-tarantool/v2/pool"
+	_ "github.com/tarantool/go-tarantool/v2/uuid"
+)
+
+type PlayerRepo interface {
+	Show(playerShowRequest PlayerShowRequest) (*PlayerResponseWithBalance, *responses.ErrorResponse)
+	ShowOne(player_uuid uuid.UUID) (*PlayerResponse, *responses.ErrorResponse)
+	Create(playerReq PlayerNewRequest) (*PlayerResponse, *responses.ErrorResponse)
+	Update(player_uuid uuid.UUID, playerReq PlayerUpdateRequest) (*PlayerResponse, *responses.ErrorResponse)
+	Delete(player_uuid uuid.UUID) (*UpdateDeleteResponse, *responses.ErrorResponse)
+	GetPlayerFormCreate() (*PlayerFormCreateResponse, *responses.ErrorResponse)
+	GetPlayerFormUpdate(player_uuid uuid.UUID) (*PlayerFormUpdateResponse, *responses.ErrorResponse)
+	Update_Password(players_uuid uuid.UUID, usreq PlayerUpdatePasswordRequest) (*PlayerUpdatePasswordReponse, *responses.ErrorResponse)
+	UpdatePlayerBetLimit(player_bet_limit_uuid uuid.UUID, player_bet_limit_update_req UpdateBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse)
+	SetPlayerBetLimit(set_bet_limit_req SetBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse)
+	UpdatePlayerStatus(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*PlayerStatusUpdateResponse, *responses.ErrorResponse)
+	UpdatePlayerStatusAndBet(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*UpdatePlayerStatusAndBetResponse, *responses.ErrorResponse)
+}
+
+type PlayerRepoImpl struct {
+	userCtx *types.UserContext
+	dbPool  *pool.ConnectionPool
+}
+
+func NewPlayerRepoImpl(u *types.UserContext, db *pool.ConnectionPool) *PlayerRepoImpl {
+	return &PlayerRepoImpl{
+		userCtx: u,
+		dbPool:  db,
+	}
+}
+
+// Test URL endpoint: {{ _.host }}/api/v1/admin/player?paging_options[page]=1&paging_options[per_page]=10&sorts[0][property]=u.id&sorts[0][direction]=desc&sorts[1][property]=u.player_name&sorts[1][direction]=desc&filters[0][property]=u.status_id&filters[0][value]=1
+func (u *PlayerRepoImpl) Show(playerShowRequest PlayerShowRequest) (*PlayerResponseWithBalance, *responses.ErrorResponse) {
+	// Paging
+	perPage := playerShowRequest.PageOptions.Perpage
+	page := playerShowRequest.PageOptions.Page
+	offset := (page - 1) * perPage
+	sqlLimit := fmt.Sprintf(" LIMIT %d OFFSET %d", perPage, offset)
+
+	// Order By output will be: `ORDER BY u.id asc, u.user_name desc`
+	sqlOrderBy := tarantool_utls.BuildSQLSort(playerShowRequest.Sorts)
+
+	// Filters output of BuildSQLFilter() will be e.g. tarantool.NewExecuteRequest("WHERE.. AND u.status_id=$1").Args([1])
+	sqlFilters, argsFilters := tarantool_utls.BuildSQLFilter(playerShowRequest.Filters)
+	if len(argsFilters) > 0 {
+		sqlFilters = " AND " + sqlFilters
+	}
+	// FIX innner join with players_roles_space
+	sql := tarantool.NewExecuteRequest(
+		fmt.Sprintf(`SELECT
+			p.id AS player_id,
+			p.player_uuid,
+			p.first_name,
+			p.last_name,
+			p.user_name,
+			p.email,
+			p.login_session,
+			p.profile_photo,
+			p.player_alias,
+			p.phone_number,
+			p.role_id,
+			p.player_avatar_id,
+			p.commission,
+			p.status_id,
+			p."order",
+			p.created_by,
+			p.created_at,
+			p.updated_by,
+			p.updated_at,
+			p.deleted_by,
+			p.deleted_at
+		FROM
+			players_space AS p
+		WHERE
+			p.deleted_at IS NULL
+	%s%s%s`,
+			sqlFilters, sqlOrderBy, sqlLimit),
+	).Args(argsFilters)
+
+	// fmt.Println(argsFilters, "argsFilters")
+	sqlTotal := tarantool.NewExecuteRequest(
+		fmt.Sprintf(`SELECT 
+            COUNT(*) AS total
+        FROM 
+            players_space p
+        WHERE p.deleted_at IS NULL %s`,
+			sqlFilters)).Args(argsFilters)
+
+	var players []Player
+	// var data [][]interface{}
+	// Send the request and get the response
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse()
+
+	if err != nil {
+		custom_log.NewCustomLog("player_show_failed", err.Error(), "error")
+		errMsg := &responses.ErrorResponse{}
+		return nil, errMsg.NewErrorResponse("player_show_failed", fmt.Errorf("could not select players from the database: %w", err))
+	}
+	// fmt.Print(data)
+	// Decode the response data into the appropriate type
+	err = resp.DecodeTyped(&players)
+	if err != nil {
+		custom_log.NewCustomLog("player_show_failed", err.Error())
+		errResp := &responses.ErrorResponse{}
+		return nil, errResp.NewErrorResponse("player_show_failed", fmt.Errorf("could not decode the players data from the database: %w", err))
+	}
+
+	var allBalanceAndCurrency []PlayerWithFullInfo
+
+	for _, player := range players {
+
+		// Create a new execute request with the SQL query
+		balancesAndCurrencies := tarantool.NewExecuteRequest(
+			`SELECT 
+				pb.balance, 
+				pb.currency_id,
+				cs.currency_code
+			FROM 
+				players_space p 
+			INNER JOIN 
+				players_balances_space pb ON p.id = pb.player_id 
+			INNER JOIN 
+				currencies_space cs  ON pb.currency_id = cs.id 
+			WHERE 
+				p.id = $1`,
+		).Args([]interface{}{player.ID})
+
+		var balanceAndCurrency []Player_Balance
+
+		resp, err := u.dbPool.Do(balancesAndCurrencies, pool.ANY).GetResponse()
+		if err != nil {
+			custom_log.NewCustomLog("player_show_failed", err.Error(), "error")
+			errMsg := &responses.ErrorResponse{}
+			return nil, errMsg.NewErrorResponse("player_show_failed", fmt.Errorf("could not select players from the database: %w", err))
+		}
+
+		// Decode the response directly into balanceAndCurrency
+		if err := resp.DecodeTyped(&balanceAndCurrency); err != nil {
+			custom_log.NewCustomLog("player_show_failed", err.Error(), "error")
+			errMsg := &responses.ErrorResponse{}
+			return nil, errMsg.NewErrorResponse("player_show_failed", fmt.Errorf("cannot decode balance and currencies: %w", err))
+		}
+
+		// get player bet setting
+		var bet_setting_sql = tarantool.NewExecuteRequest(`
+			SELECT 
+				b.player_bet_limit_uuid,
+				b.max_bet_amount,
+				b.currency_id,
+				c.currency_code
+			FROM players_bets_limits_space b
+			INNER JOIN currencies_space c ON b.currency_id = c.id
+			WHERE b.deleted_at IS NULL AND c.deleted_at IS NULL
+			AND b.player_id = $1
+		`).Args([]interface{}{player.ID})
+
+		var bets_settings []PlayerBetSetting
+
+		bet_setting_resp, err := u.dbPool.Do(bet_setting_sql, pool.ANY).GetResponse()
+		if err != nil {
+			custom_log.NewCustomLog("player_show_failed", err.Error(), "error")
+			errMsg := &responses.ErrorResponse{}
+			return nil, errMsg.NewErrorResponse("player_show_failed", fmt.Errorf("could not select players bet setting from the database: %w", err))
+		}
+
+		// Decode the response directly into balanceAndCurrency
+		if err := bet_setting_resp.DecodeTyped(&bets_settings); err != nil {
+			custom_log.NewCustomLog("player_show_failed", err.Error(), "error")
+			errMsg := &responses.ErrorResponse{}
+			return nil, errMsg.NewErrorResponse("player_show_failed", fmt.Errorf("cannot decode bet setting: %w", err))
+		}
+
+		playerWithBalanceAndCurrencies := []PlayerWithFullInfo{{
+			PlayerUUID:         player.PlayerUUID,
+			FirstName:          player.FirstName,
+			LastName:           player.LastName,
+			UserName:           player.UserName,
+			Email:              player.Email,
+			ProfilePhoto:       player.ProfilePhoto,
+			PlayerAlias:        player.PlayerAlias,
+			PhoneNumber:        player.PhoneNumber,
+			Commission:         player.Commission,
+			LoginSession:       player.LoginSession,
+			RoleId:             player.RoleId,
+			PlayerBalances:     balanceAndCurrency,
+			PlayerBetsSettings: bets_settings,
+			PlayerAvatarID:     player.PlayerAvatarID,
+			StatusID:           player.StatusID,
+			Order:              player.Order,
+			CreatedBy:          player.CreatedBy,
+			CreatedAt:          player.CreatedAt,
+			UpdatedBy:          player.UpdatedBy,
+			UpdatedAt:          player.UpdatedAt,
+			DeletedAt:          player.DeletedAt,
+			DeletedBy:          player.DeletedBy,
+		}}
+		// // Append the decoded data to allBalanceAndCurrency
+		allBalanceAndCurrency = append(allBalanceAndCurrency, playerWithBalanceAndCurrencies...)
+	}
+
+	var totalRecords []TotalRecord
+	// Send the request and get the response for total count
+	respTotal, err := u.dbPool.Do(sqlTotal, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("player_show_failed", err.Error(), "error")
+		errMsg := &responses.ErrorResponse{}
+		return nil, errMsg.NewErrorResponse("player_show_failed", fmt.Errorf("could not select total player count from the database: %w", err))
+	}
+
+	// Decode the response data into the appropriate type
+	err = respTotal.DecodeTyped(&totalRecords)
+	if err != nil {
+		custom_log.NewCustomLog("player_show_failed", err.Error())
+		errResp := &responses.ErrorResponse{}
+		return nil, errResp.NewErrorResponse("player_show_failed", fmt.Errorf("could not decode total player count from the database: %w", err))
+	}
+
+	return &PlayerResponseWithBalance{Players: allBalanceAndCurrency, Total: totalRecords[0].Total}, nil
+}
+
+func (u *PlayerRepoImpl) ShowOne(playerUUID uuid.UUID) (*PlayerResponse, *responses.ErrorResponse) {
+	var sql = tarantool.NewExecuteRequest(
+		`SELECT 
+            p.id, p.player_uuid, p.first_name, p.last_name, p.user_name, p.email, 
+            p.login_session, p.profile_photo, p.player_alias, p.phone_number, p.role_id,
+            p.player_avatar_id, p.commission, p.status_id, p."order",
+			p.created_by, p.created_at, p.updated_by, p.updated_at, p.deleted_by, p.deleted_at
+        FROM 
+            players_space p
+        WHERE p.deleted_at IS NULL AND p.player_uuid= $1`,
+	).Args([]interface{}{playerUUID})
+
+	var players []Player
+	// Send the request and get the response using the connection
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse() // Use the connection directly to execute the request
+	if err != nil {
+		custom_log.NewCustomLog("player_showone_failed", err.Error(), "error")
+		errMsg := &responses.ErrorResponse{}
+		return nil, errMsg.NewErrorResponse("player_showone_failed", fmt.Errorf("cannot select player: database error"))
+	}
+
+	// Decode the response data into the appropriate type
+	err = resp.DecodeTyped(&players)
+	if err != nil {
+		custom_log.NewCustomLog("player_showone_failed", err.Error())
+		errResp := &responses.ErrorResponse{}
+		return nil, errResp.NewErrorResponse("player_showone_failed", fmt.Errorf("cannot decode the selected player data"))
+	}
+
+	return &PlayerResponse{Players: players, Total: 1}, nil
+}
+
+func (u *PlayerRepoImpl) Create(PlayerReq PlayerNewRequest) (*PlayerResponse, *responses.ErrorResponse) {
+
+	playerAddModel := &PlayerAddModel{}
+
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("player_create_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest() // Use a separate variable for the BeginRequest
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_create_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = playerAddModel.New(PlayerReq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_create_failed", err)
+	}
+
+	// Prepare your SQL query
+	var sql = `
+		INSERT INTO players_space (
+		id,	player_uuid, first_name, last_name, user_name, password, email, 
+            login_session, profile_photo, player_alias, phone_number, 
+            player_avatar_id, commission, status_id, "order", created_by, created_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+		)`
+
+	// Create a request with the SQL query
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		playerAddModel.ID,
+		playerAddModel.PlayerUUID,
+		playerAddModel.FirstName,
+		playerAddModel.LastName,
+		playerAddModel.UserName,
+		playerAddModel.Password,
+		playerAddModel.Email,
+		playerAddModel.LoginSession,
+		playerAddModel.ProfilePhoto,
+		playerAddModel.PlayerAlias,
+		playerAddModel.PhoneNumber,
+		playerAddModel.PlayerAvatarID,
+		playerAddModel.Commission,
+		playerAddModel.StatusID,
+		playerAddModel.Order,
+		playerAddModel.CreatedBy,
+		playerAddModel.CreatedAt,
+	})
+
+	// Execute the query using the stream
+	_, err = stream.Do(execReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_create_failed", fmt.Errorf("cannot execute insert"))
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest() // Use a separate variable for the CommitRequest
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_create_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	//Add Audit
+	var audit_des = fmt.Sprintf("New player `%s` has been created", playerAddModel.UserName)
+	_, err = utls.AddUserAuditLog(
+		int(playerAddModel.ID), "New Player", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(playerAddModel.CreatedBy), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_create_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_create_failed", fmt.Errorf("cannot add audit"))
+	}
+	return u.ShowOne(playerAddModel.PlayerUUID)
+
+}
+
+func (u *PlayerRepoImpl) Update(player_uuid uuid.UUID, playerReq PlayerUpdateRequest) (*PlayerResponse, *responses.ErrorResponse) {
+
+	playerUpdateModel := &PlayerUpdateModel{}
+
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("player_update_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest() // Use a separate variable for the BeginRequest
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = playerUpdateModel.New(player_uuid, playerReq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", err)
+	}
+	// fmt.Println("playerUpdateModel:", playerUpdateModel)
+
+	var sql = `UPDATE players_space SET
+		"first_name" = $1, 
+		"last_name" = $2, 
+		"user_name" = $3, 
+		"password" = $4, 
+		"email" = $5,
+		"profile_photo" = $6, 
+		"commission" = $7, 
+		"phone_number" = $8,
+		"status_id" = $9,
+		"role_id" = $10,
+		"updated_by" = $11, 
+		"updated_at" = $12
+	WHERE "player_uuid" = $13`
+
+	// Create a request with the SQL query
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		playerUpdateModel.FirstName,    // $1
+		playerUpdateModel.LastName,     // $2
+		playerUpdateModel.UserName,     // $3
+		playerUpdateModel.Password,     // $4
+		playerUpdateModel.Email,        // $5
+		playerUpdateModel.ProfilePhoto, // $6
+		playerUpdateModel.Commission,   // $7
+		playerUpdateModel.PhoneNumber,  // $8
+		playerUpdateModel.StatusID,     // $9
+		playerUpdateModel.RoleId,       // $10
+		playerUpdateModel.UpdatedBy,    // $11
+		playerUpdateModel.UpdatedAt,    // $12
+		playerUpdateModel.PlayerUUID,   // $13
+	})
+
+	_, err = stream.Do(execReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot execute update"))
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest() // Use a separate variable for the CommitRequest
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	//Add Audit
+	var audit_des = fmt.Sprintf("Updating player `%s %s` has been sucessful", playerUpdateModel.FirstName, playerUpdateModel.LastName)
+	_, err = utls.AddUserAuditLog(
+		int(playerUpdateModel.ID), "Update player", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(playerUpdateModel.UpdatedBy), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot add audit"))
+	}
+
+	//add notification
+	var notification_subject = "Personal information has been updated"
+	var notification_desc = fmt.Sprintf("user id `%d` has update your personal information", playerUpdateModel.UpdatedBy)
+	err = utls.AddNotification(
+		"players_notifications_space", "player", int(playerUpdateModel.ID), "Personal Information", notification_subject,
+		notification_desc, 1, 1, int(playerUpdateModel.UpdatedBy), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot add audit"))
+	}
+	return u.ShowOne(playerUpdateModel.PlayerUUID)
+}
+
+func (u *PlayerRepoImpl) Delete(player_uuid uuid.UUID) (*UpdateDeleteResponse, *responses.ErrorResponse) {
+
+	//Get current OS time
+	app_timezone := os.Getenv("APP_TIMEZONE")
+	location, err := time.LoadLocation(app_timezone)
+	if err != nil {
+		custom_log.NewCustomLog("player_delete_failed", fmt.Errorf("failed to load location: %w", err).Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("can not delete player"))
+	}
+	local_now := time.Now().In(location)
+	now, err := datetime.MakeDatetime(local_now)
+	if err != nil {
+		custom_log.NewCustomLog("player_delete_failed", fmt.Errorf("failed make datetime type for tarantool: %w", err).Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("can not delete player"))
+	}
+
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", u.userCtx.UserUuid, u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_delete_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("can not delete player"))
+	}
+
+	//Get target delete player info
+	players, err_one := u.ShowOne(player_uuid)
+	if err_one != nil {
+		custom_log.NewCustomLog("player_delete_failed", err_one.Err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("player target to delete failed to get info"))
+
+	} else {
+		if len(players.Players) <= 0 {
+			custom_log.NewCustomLog("player_delete_failed", "Can not get info deleted player", "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("player target to delete not found"))
+		}
+	}
+
+	var sql = tarantool.NewExecuteRequest(
+		`UPDATE players_space SET
+			"status_id" = $1, "deleted_by"=$2, "deleted_at" = $3, "updated_by" = $4, "updated_at" = $5
+		WHERE "player_uuid" = $6`,
+	).Args([]interface{}{0, by_id, now, by_id, now, player_uuid})
+	// Send the request and get the response using the connection
+	_, err = u.dbPool.Do(sql, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_delete_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("player_delete_failed", fmt.Errorf("can not delete player: database error"))
+	}
+
+	//Add Audit
+	var audit_des = fmt.Sprintf("Deleting player `%s %s` has been successful", players.Players[0].FirstName, players.Players[0].LastName)
+	_, err = utls.AddUserAuditLog(
+		int(players.Players[0].ID), "Delete player", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(*by_id), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_delete_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("cannot add audit"))
+	}
+
+	return &UpdateDeleteResponse{Success: true}, nil
+}
+
+func (u *PlayerRepoImpl) GetStatus() *[]types.Status {
+	return &types.StatusData
+}
+
+func (u *PlayerRepoImpl) GetRoles() (*[]Role, error) {
+	var sql = tarantool.NewExecuteRequest(
+		`SELECT 
+            id, player_role_name
+        FROM 
+            players_roles_space r
+        WHERE r.deleted_at is null ORDER BY r.player_role_name asc`,
+	)
+
+	var roles []Role
+	// Send the request and get the response using the connection
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse() // Use the connection directly to execute the request
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode the response data into the appropriate type
+	err = resp.DecodeTyped(&roles)
+	if err != nil {
+		return nil, err
+	}
+	return &roles, nil
+}
+
+func (u *PlayerRepoImpl) GetPlayerFormCreate() (*PlayerFormCreateResponse, *responses.ErrorResponse) {
+	status := u.GetStatus()
+	roles, err := u.GetRoles()
+	if err != nil {
+		custom_log.NewCustomLog("player_create_form_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_create_form_failed", fmt.Errorf("cannot get role"))
+	}
+
+	var playerCreateForms = []PlayerCreateForm{
+		{
+			FirstName:       "",
+			LastName:        "",
+			UserName:        "",
+			Password:        "",
+			PasswordConfirm: "",
+			Email:           "",
+			RoleId:          1,
+			PhoneNumber:     "",
+			StatusId:        1,
+			Status:          *status,
+			Roles:           *roles,
+		},
+	}
+
+	return &PlayerFormCreateResponse{Players: playerCreateForms}, nil
+}
+
+func (u *PlayerRepoImpl) GetPlayerFormUpdate(player_uuid uuid.UUID) (*PlayerFormUpdateResponse, *responses.ErrorResponse) {
+	//Get target delete player info
+	player, err_one := u.ShowOne(player_uuid)
+	if err_one != nil {
+		custom_log.NewCustomLog("player_delete_failed", err_one.Err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_delete_failed", fmt.Errorf("player target to delete failed to get info"))
+
+	} else {
+		if len(player.Players) <= 0 {
+			return &PlayerFormUpdateResponse{Players: []PlayerUpdateForm{}}, nil
+		}
+	}
+
+	status := u.GetStatus()
+	roles, err := u.GetRoles()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_form_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_form_failed", fmt.Errorf("cannot get role"))
+	}
+
+	var playerUpdateForms = []PlayerUpdateForm{
+		{
+			FirstName: player.Players[0].FirstName,
+			LastName:  player.Players[0].LastName,
+			UserName:  player.Players[0].UserName,
+			Email:     player.Players[0].Email,
+			Status:    *status,
+			Roles:     *roles,
+		},
+	}
+
+	return &PlayerFormUpdateResponse{Players: playerUpdateForms}, nil
+}
+
+func (u *PlayerRepoImpl) Update_Password(players_uuid uuid.UUID, usreq PlayerUpdatePasswordRequest) (*PlayerUpdatePasswordReponse, *responses.ErrorResponse) {
+
+	var RequestChangePassword = &PlayerUpdatePasswordModel{}
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("player_update_password_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest() // Use a separate variable for the BeginRequest
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = RequestChangePassword.New(players_uuid, usreq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", err)
+	}
+	//Get player logined id
+	by_id, err := tarantool_utls.GetIdByUuid("users_space", "user_uuid", u.userCtx.UserUuid, u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("can not update password "))
+	}
+
+	//Get target delete player info
+	players, err_one := u.ShowOne(players_uuid)
+	if err_one != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err_one.Err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("player target to update password failed to get info"))
+
+	} else {
+		if len(players.Players) <= 0 {
+			custom_log.NewCustomLog("player_delete_failed", "Can not get info deleted player", "error")
+			err_resp := &responses.ErrorResponse{}
+			return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("player target to update password not found"))
+		}
+	}
+
+	var sql = tarantool.NewExecuteRequest(
+		`UPDATE players_space SET
+			"password" = $1, "updated_by"=$2, "updated_at" = $3
+		WHERE "player_uuid" = $4`,
+	).Args([]interface{}{
+		RequestChangePassword.Password,
+		RequestChangePassword.UpdatedBy,
+		RequestChangePassword.UpdatedAt,
+		RequestChangePassword.playerUUID,
+	})
+	// Execute the query using the stream
+	_, err = stream.Do(sql).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("cannot execute update password"))
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest() // Use a separate variable for the CommitRequest
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	var audit_des = fmt.Sprintf("Updating `%s %s`'s password has been successful", players.Players[0].FirstName, players.Players[0].LastName)
+	_, err = utls.AddUserAuditLog(
+		int(players.Players[0].ID), "Update player's password", audit_des, 1, u.userCtx.UserAgent,
+		u.userCtx.UserName, u.userCtx.Ip, int(*by_id), u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_password_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_password_failed", fmt.Errorf("cannot add audit"))
+	}
+
+	return &PlayerUpdatePasswordReponse{Success: true}, nil
+}
+
+func (u *PlayerRepoImpl) PlayerBetLimitShowOne(player_bet_limit_uuid uuid.UUID) (*PlayerBetLimitResponse, *responses.ErrorResponse) {
+	// prepare sql
+	var sql = tarantool.NewExecuteRequest(`
+		SELECT
+			id, player_bet_limit_uuid, player_id, max_bet_amount, currency_id, status_id, "order",
+			created_by, created_at, updated_by, updated_at, deleted_by, deleted_at
+		FROM 
+			players_bets_limits_space
+		WHERE deleted_at IS NULL AND player_bet_limit_uuid = $1
+	`).Args([]interface{}{player_bet_limit_uuid})
+
+	// execute request
+	var players_bets_limits []PlayerBetLimit
+	resp, err := u.dbPool.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("player_bet_limit_show_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_bet_limit_show_failed", fmt.Errorf("cannot select player bet limit database error"))
+	}
+
+	if err := resp.DecodeTyped(&players_bets_limits); err != nil {
+		custom_log.NewCustomLog("player_bet_limit_show_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_bet_limit_show_failed", fmt.Errorf("cannot decode player bet limit"))
+	}
+
+	return &PlayerBetLimitResponse{PlayersBetsLimits: players_bets_limits}, nil
+}
+
+func (u *PlayerRepoImpl) UpdatePlayerBetLimit(player_bet_limit_uuid uuid.UUID, player_bet_limit_update_req UpdateBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse) {
+	var playerBetLimitUpdateModel BetLimitUpdateModel
+
+	// create update model
+	if err := playerBetLimitUpdateModel.New(player_bet_limit_uuid, player_bet_limit_update_req, u.userCtx, u.dbPool); err != nil {
+		custom_log.NewCustomLog("player_bet_limit_update_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_bet_limit_update_failed", fmt.Errorf("cannot create new model"))
+	}
+
+	// prapare sql
+	var sql = tarantool.NewExecuteRequest(`
+		UPDATE players_bets_limits_space SET
+			max_bet_amount = $1,
+			updated_by = $2,
+			updated_at = $3
+		WHERE deleted_at IS NULL
+		AND player_bet_limit_uuid = $4
+	`).Args([]interface{}{
+		playerBetLimitUpdateModel.MaxBetAmount,
+		playerBetLimitUpdateModel.UpdatedBy,
+		playerBetLimitUpdateModel.UpdateAt,
+		player_bet_limit_uuid,
+	})
+
+	// execute request
+	_, err := u.dbPool.Do(sql, pool.ANY).GetResponse()
+	if err != nil {
+		custom_log.NewCustomLog("player_bet_limit_update_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_bet_limit_update_failed", fmt.Errorf("cannot update player bet limit"))
+	}
+
+	return u.PlayerBetLimitShowOne(player_bet_limit_uuid)
+}
+
+func (u *PlayerRepoImpl) SetPlayerBetLimit(set_bet_limit_req SetBetLimitRequest) (*PlayerBetLimitResponse, *responses.ErrorResponse) {
+	var setPlayerBetLimitNewModel SetBetLimitNewModel
+
+	// create new model
+	if err := setPlayerBetLimitNewModel.New(set_bet_limit_req, u.userCtx, u.dbPool); err != nil {
+		custom_log.NewCustomLog("player_bet_limit_set_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_bet_limit_set_failed", fmt.Errorf("cannot create new model"))
+	}
+
+	// prepare sql
+	var sql = tarantool.NewExecuteRequest(`
+		INSERT INTO players_bets_limits_space (
+			id, player_bet_limit_uuid, player_id, max_bet_amount, currency_id,
+			status_id, "order", created_by, created_at
+		) VALUES (
+		 	$1, $2, $3, $4, $5, $6, $7, $8, $9
+		)
+	`).Args([]interface{}{
+		setPlayerBetLimitNewModel.ID,
+		setPlayerBetLimitNewModel.PlayerBetLimitUUID,
+		setPlayerBetLimitNewModel.PlayerID,
+		setPlayerBetLimitNewModel.MaxBetAmount,
+		setPlayerBetLimitNewModel.CurrencyID,
+		setPlayerBetLimitNewModel.StatusID,
+		setPlayerBetLimitNewModel.Order,
+		setPlayerBetLimitNewModel.CreatedBy,
+		setPlayerBetLimitNewModel.CreatedAt,
+	})
+
+	// execute request
+	_, err := u.dbPool.Do(sql, pool.ANY).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_bet_limit_set_failed", err.Error(), "warn")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_bet_limit_set_failed", fmt.Errorf("cannot insert player bet limit"))
+	}
+
+	return u.PlayerBetLimitShowOne(setPlayerBetLimitNewModel.PlayerBetLimitUUID)
+}
+
+// PROCESS OF BET STATUS AND PLAYER STATUS
+func (u *PlayerRepoImpl) UpdatePlayerStatus(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*PlayerStatusUpdateResponse, *responses.ErrorResponse) {
+	playerStatusUpdateModel := &PlayerStatusUpdateModel{}
+
+	// Create a new stream from the connection pool
+	stream, err := u.dbPool.NewStream(pool.RW)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse("player_update_failed", fmt.Errorf("cannot create stream"))
+	}
+
+	// Begin transaction (optional)
+	beginReq := tarantool.NewBeginRequest()
+	_, err = stream.Do(beginReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot begin transaction"))
+	}
+
+	err = playerStatusUpdateModel.New(player_uuid, psreq, u.userCtx, stream)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", err)
+	}
+
+	var sql = `
+	UPDATE players_space SET
+		"status_id" = $1,
+		"login_session" = $2,
+		"updated_by" = $3, 
+		"updated_at" = $4
+	WHERE "id" = $5`
+
+	// Execute SQL query
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		playerStatusUpdateModel.StatusID,
+		playerStatusUpdateModel.LoginSession,
+		playerStatusUpdateModel.UpdatedBy,
+		playerStatusUpdateModel.UpdatedAt,
+		playerStatusUpdateModel.ID,
+	})
+
+	_, err = stream.Do(execReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot update player status in db"))
+	}
+
+	// Commit the transaction (optional)
+	commitReq := tarantool.NewCommitRequest()
+	_, err = stream.Do(commitReq).Get()
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("cannot commit transaction"))
+	}
+
+	player, errPlayer := u.ShowOne(player_uuid)
+	if errPlayer != nil {
+		return nil, errPlayer
+	}
+
+	return &PlayerStatusUpdateResponse{PlayerResponse: *player, StatusName: playerStatusUpdateModel.StatusName}, nil
+}
+
+// *--------- ## >> START PROCESS OF UPDATE PLAYER STATUS AND BET << ## ---------* \\
+func updatePlayerStatusInDB(stream *tarantool.Stream, plsModel *PlayerStatusAndBetUpdateModel) error {
+	var sql = `
+		UPDATE players_space SET
+			"status_id" = $1,
+			"login_session" = $2,
+			"updated_by" = $3, 
+			"updated_at" = $4
+		WHERE "id" = $5`
+
+	// Execute SQL query
+	execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+		plsModel.StatusID,
+		plsModel.LoginSession,
+		plsModel.UpdatedBy,
+		plsModel.UpdatedAt,
+		plsModel.ID,
+	})
+
+	_, err := stream.Do(execReq).Get()
+	if err != nil {
+		return fmt.Errorf("failed to update player status for player id %d: %w", plsModel.ID, err)
+	}
+
+	return nil
+}
+
+func updateBetStatus(stream *tarantool.Stream, plsModel *PlayerStatusAndBetUpdateModel) error {
+	var sql = `
+		UPDATE bets_space  SET
+			"status_id" = 2,
+			"updated_by" = $1,
+			"updated_at" = $2
+		WHERE "player_id" = $3 AND "round_id" = $4`
+
+	for _, round := range plsModel.LastRound.LastRounds {
+		execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+			plsModel.UpdatedBy,
+			plsModel.UpdatedAt,
+			plsModel.ID,
+			round.ID,
+		})
+
+		_, err := stream.Do(execReq).Get()
+		if err != nil {
+			return fmt.Errorf("failed to update bet status for round_id %d: %w", round.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func updateTicketStatus(stream *tarantool.Stream, plsModel *PlayerStatusAndBetUpdateModel) error {
+	var sql = `
+		UPDATE tickets_space SET
+			"status_id" = 2,
+			"updated_by" = $1,
+			"updated_at" = $2
+		WHERE "player_id" = $3 AND "round_id" = $4`
+
+	for _, round := range plsModel.LastRound.LastRounds {
+		execReq := tarantool.NewExecuteRequest(sql).Args([]interface{}{
+			plsModel.UpdatedBy,
+			plsModel.UpdatedAt,
+			plsModel.ID,
+			round.ID,
+		})
+
+		_, err := stream.Do(execReq).Get()
+		if err != nil {
+			return fmt.Errorf("failed to update ticket status for round_id %d: %w", round.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func ExecuteUpdateStatusAndBet(stream *tarantool.Stream, plsModel *PlayerStatusAndBetUpdateModel) error {
+	// update player status
+
+	if err := updatePlayerStatusInDB(stream, plsModel); err != nil {
+		return err
+	}
+
+	// update bet
+	if err := updateBetStatus(stream, plsModel); err != nil {
+		return err
+	}
+
+	// update ticket
+	if err := updateTicketStatus(stream, plsModel); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (u *PlayerRepoImpl) UpdatePlayerStatusAndBet(player_uuid uuid.UUID, psreq PlayerStatusUpdateRequest) (*UpdatePlayerStatusAndBetResponse, *responses.ErrorResponse) {
+	playerStatusAndBetUpdateModel := &PlayerStatusAndBetUpdateModel{}
+
+	err := playerStatusAndBetUpdateModel.New(player_uuid, psreq, u.userCtx, u.dbPool)
+	if err != nil {
+		custom_log.NewCustomLog("player_update_failed", err.Error())
+		err_resp := &responses.ErrorResponse{}
+		return nil, err_resp.NewErrorResponse("player_update_failed", err)
+	}
+
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		stream, err := u.dbPool.NewStream(pool.RW)
+		if err != nil {
+			custom_log.NewCustomLog("player_update_failed", err.Error(), "error")
+			err_msg := &responses.ErrorResponse{}
+			return nil, err_msg.NewErrorResponse("player_update_failed", fmt.Errorf("failed to create a new stream from the database pool"))
+		}
+
+		// (START DB TRANSACION) Start a database transaction
+		beginReq := tarantool.NewBeginRequest()
+		if _, err := stream.Do(beginReq).Get(); err != nil {
+			custom_log.NewCustomLog("player_update_failed", fmt.Sprintf("Attempt %d: Failed to begin transaction: %v", attempt, err), "error")
+			_ = stream.Do(tarantool.NewRollbackRequest()) // Attempt rollback if begin fails
+			continue                                      // Retry on failure
+		}
+
+		if err := ExecuteUpdateStatusAndBet(stream, playerStatusAndBetUpdateModel); err != nil {
+			custom_log.NewCustomLog("player_update_failed", fmt.Sprintf("Attempt %d: Failed to execute update: %v", attempt, err), "error")
+			_ = stream.Do(tarantool.NewRollbackRequest()) // Rollback on failure
+			continue
+		}
+
+		// COMMIT THE TRANSACTION (Commit the transaction)
+		commitReq := tarantool.NewCommitRequest()
+		if _, err = stream.Do(commitReq).Get(); err != nil {
+			custom_log.NewCustomLog("player_update_failed", fmt.Sprintf("Attempt %d: Failed to commit transaction: %v", attempt, err), "error")
+			_ = stream.Do(tarantool.NewRollbackRequest())
+			continue
+		}
+
+		player, errPlayer := u.ShowOne(player_uuid)
+		if errPlayer != nil {
+			return nil, errPlayer
+		}
+
+		return &UpdatePlayerStatusAndBetResponse{StatusName: playerStatusAndBetUpdateModel.StatusName, PlayerResponse: *player, BetResponse: playerStatusAndBetUpdateModel.Bet}, nil
+	}
+
+	// If all attempts failed, log the error and return failure response
+	custom_log.NewCustomLog("player_update_failed", "Failed to commit the transaction after multiple attempts", "error")
+	err_resp := &responses.ErrorResponse{}
+	return nil, err_resp.NewErrorResponse("player_update_failed", fmt.Errorf("transaction failure after %d attempts", maxRetries))
+}

@@ -1,0 +1,100 @@
+package auth
+
+import (
+	"{{PROJECT_NAME}}/pkg/utls"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2/datetime"
+	"github.com/tarantool/go-tarantool/v2/decimal"
+)
+
+type Auth struct {
+	Username string
+	Password string
+}
+
+type AuthLogin struct {
+	Username string
+	Password string
+}
+
+type AuthLoginRequest struct {
+	Auth struct {
+		Username string `json:"username" validate:"required"`
+		Password string `json:"password" validate:"required"`
+	} `json:"auth"`
+}
+
+type User struct {
+	Id             uint8
+	UserUuid       uuid.UUID
+	UserName       string
+	RoleId         uint8
+	LoginSessionId string
+	Commission     decimal.Decimal
+	CreatedAt      datetime.Datetime
+}
+type Valid struct {
+	Isvalid int
+}
+
+type AuthLoginResponse struct {
+	Auth struct {
+		Token     string `json:"token"`
+		TokenType string `json:"token_type"`
+	} `json:"auth"`
+}
+
+func NewAuthLoginResponse(a *AuthLoginRequest) *AuthLoginResponse {
+
+	au := new(AuthLoginResponse)
+	au.Auth.Token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjcyMjU1OTksInVzZXJfaWQiOjEsInVzZXJfbmFtZSI6ImFkbWluIiwibG9naW5fc2Vzc2lvbiI6InNkYWZzZGYifQ.Viy5Z5TBkmCrxBrUhA9GdKyX2hG5yyvqLuGEJyRd5k4"
+	au.Auth.TokenType = "jwt"
+	return au
+}
+
+func (r *AuthLoginRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+type UserForMini struct {
+	Id             uint8
+	UserUuid       uuid.UUID
+	UserName       string
+	RoleId         uint8
+	LoginSessionId string
+	Commission     decimal.Decimal
+	CreatedAt      datetime.Datetime
+	UserAlias      string
+}
+type MiniLoginRequest struct {
+	Username string `json:"user_name" validate:"required"`
+	Password string `json:"password" validate:"required"`
+}
+
+func (r *MiniLoginRequest) bind(c *fiber.Ctx, v *utls.Validator) error {
+	if err := c.BodyParser(r); err != nil {
+		return err
+	}
+
+	if err := v.Validate(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+type MiniLoginResponse struct {
+	NickName   string `json:"nickname"`
+	UserName   string `json:"username"`
+	CurrencyID uint64 `json:"currency_id"`
+	Token      string `json:"token"`
+}

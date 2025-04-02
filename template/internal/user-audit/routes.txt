@@ -1,0 +1,30 @@
+package user_audit
+
+import (
+	"github.com/gofiber/fiber/v2"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+// UserHandler struct
+type UserAuditRoute struct {
+	app     *fiber.App
+	db      *pool.ConnectionPool
+	handler *UserAuditHandler
+}
+
+func NewRoute(app *fiber.App, db *pool.ConnectionPool) *UserAuditRoute {
+	handler := NewHandler(db)
+	return &UserAuditRoute{
+		app:     app,
+		db:      db,
+		handler: handler,
+	}
+}
+
+func (ua *UserAuditRoute) RegisterUserAuditRoute() *UserAuditRoute {
+	v1 := ua.app.Group("/api/v1/admin/")
+	roundLog := v1.Group("/useraudit")
+	roundLog.Get("/", ua.handler.Show)
+
+	return ua
+}

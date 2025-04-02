@@ -1,0 +1,38 @@
+package websocket
+
+import (
+	"fmt"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type webSocketCreator interface {
+	GetLoginSession(login_session string) (bool, *responses.ErrorResponse)
+}
+
+type webSocketService struct {
+	userCtx  types.UserContext
+	dbPool   *pool.ConnectionPool
+	userRepo UserRepo
+}
+
+func NewwebSocketService(u types.UserContext, db *pool.ConnectionPool) *webSocketService {
+	// fmt.Println("NewwebSocketServiceX:", u)
+	r := NewUserRepoImpl(u, db)
+	return &webSocketService{
+		userCtx:  u,
+		dbPool:   db,
+		userRepo: r,
+	}
+}
+func (a *webSocketService) GetLoginSession(login_session string) (bool, *responses.ErrorResponse) {
+	fmt.Print("a.userCtx", a.userCtx)
+	success, err := a.userRepo.GetLoginSession(login_session)
+	if success {
+		return success, nil
+	} else {
+		return false, err
+	}
+}

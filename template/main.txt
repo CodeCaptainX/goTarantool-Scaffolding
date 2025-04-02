@@ -1,0 +1,49 @@
+package main
+
+//Import
+import (
+	//Standard
+	"fmt"
+
+	//Internal
+	"{{PROJECT_NAME}}/config"
+	"{{PROJECT_NAME}}/handler"
+	"{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/swagger"
+	"{{PROJECT_NAME}}/pkg/tarantool"
+	"{{PROJECT_NAME}}/pkg/watcher"
+	"{{PROJECT_NAME}}/router"
+
+	_ "{{PROJECT_NAME}}/docs"
+)
+
+func main() {
+	// Load environment variables from .env file
+	app_configs := config.NewAppConfig()
+
+	// Log
+	logLevel := "info"
+	logs.NewLog(logLevel)
+
+	// Init Tarantool database and connection pool
+	tarantool_configs := tarantool.NewTarantoolConfig()
+	db_pool, _ := tarantool.New(tarantool_configs.Host, tarantool_configs.Port, tarantool_configs.User, tarantool_configs.Pass, tarantool_configs.PoolSize)
+
+	// Subscribe the watcher
+	watcher.SubscribeBroadcastKey(db_pool)
+
+	// Init `GoFiber framework`, `Cors` and hanler configuration
+	apps := router.New(db_pool)
+
+	// Swagger
+	swagger.NewSwagger(apps, app_configs.AppHost, app_configs.AppPort)
+
+	// Init router
+	handler.NewServiceHandlers(apps, db_pool)
+
+	// Http Server
+	err := apps.Listen(fmt.Sprintf("%s:%d", app_configs.AppHost, app_configs.AppPort))
+	if err != nil {
+		fmt.Printf("%v", err)
+	}
+}

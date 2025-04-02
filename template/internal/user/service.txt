@@ -1,0 +1,167 @@
+package user
+
+import (
+	"fmt"
+	"log"
+	custom_log "{{PROJECT_NAME}}/pkg/logs"
+	"{{PROJECT_NAME}}/pkg/middlewares"
+	"{{PROJECT_NAME}}/pkg/responses"
+	types "{{PROJECT_NAME}}/pkg/share"
+	tarantool_utls "{{PROJECT_NAME}}/pkg/tarantool"
+	"{{PROJECT_NAME}}/pkg/utls"
+
+	"github.com/google/uuid"
+	"github.com/tarantool/go-tarantool/v2/pool"
+)
+
+type UserCreator interface {
+	GetLoginSession(login_session string) (bool, *responses.ErrorResponse)
+	Show(userShowRequest UserShowRequest) (*UserResponse, *responses.ErrorResponse)
+	ShowOne(user_uuid uuid.UUID) (*UserResponse, *responses.ErrorResponse)
+	Create(usreq UserNewRequest) (*UserResponse, *responses.ErrorResponse)
+	Update(user_uuid uuid.UUID, usreq UserUpdateRequest) (*UserResponse, *responses.ErrorResponse)
+	Delete(user_uuid uuid.UUID) (*UserDeleteResponse, *responses.ErrorResponse)
+	GetUserFormCreate() (*UserFormCreateResponse, *responses.ErrorResponse)
+	GetUserFormUpdate(user_uuid uuid.UUID) (*UserFormUpdateResponse, *responses.ErrorResponse)
+	Update_Password(user_uuid uuid.UUID, usreq UserUpdatePasswordRequest) (*UserUpdatePasswordReponse, *responses.ErrorResponse)
+	GetUserBasicInfo() (*UserBasicInfoResponse, *responses.ErrorResponse)
+}
+
+type UserService struct {
+	userCtx  *types.UserContext
+	dbPool   *pool.ConnectionPool
+	userRepo UserRepo
+}
+
+func NewUserService(u *types.UserContext, db *pool.ConnectionPool) *UserService {
+	r := NewUserRepoImpl(u, db)
+	return &UserService{
+		userCtx:  u,
+		dbPool:   db,
+		userRepo: r,
+	}
+}
+
+func (u *UserService) GetLoginSession(login_session string) (bool, *responses.ErrorResponse) {
+	fmt.Print("u.userCtx", u.userCtx)
+	success, err := u.userRepo.GetLoginSession(login_session)
+	if success {
+		return success, nil
+	} else {
+		return false, err
+	}
+}
+
+func (u *UserService) checkPermission(function_id string) *responses.ErrorResponse {
+	if !middlewares.HasPermission(u.userCtx.RoleId, "user", function_id, u.dbPool) {
+		custom_log.NewCustomLog("permission_denied", "Permission denied", "error")
+		err_msg := &responses.ErrorResponse{}
+		return err_msg.NewErrorResponse("permission_denied", fmt.Errorf("permission denied"))
+	}
+	return nil
+}
+
+func (u *UserService) Show(userShowRequest UserShowRequest) (*UserResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.Show(userShowRequest)
+	if err == nil {
+		return success, nil
+	} else {
+		return nil, err
+	}
+}
+
+func (u *UserService) ShowOne(id uuid.UUID) (*UserResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.ShowOne(id)
+	if err == nil {
+		return success, nil
+	} else {
+		return nil, err
+	}
+}
+
+func (u *UserService) Create(usreq UserNewRequest) (*UserResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("2"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.Create(usreq)
+	return success, err
+}
+
+func (u *UserService) Update(id uuid.UUID, usreq UserUpdateRequest) (*UserResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.Update(id, usreq)
+	if success != nil {
+		// add notification
+		var notificationContext = "Profile"
+		var notificationSubject = "Profile updated"
+		var notificationDescription = "Your profile information has been successfully updated"
+		err := utls.AddNotification("users_notifications_space", "user", int(success.Users[0].ID),
+			notificationContext, notificationSubject, notificationDescription, 1, 1, int(*success.Users[0].UpdatedBy), u.dbPool)
+		if err != nil {
+			log.Println("Error add notification", err)
+		}
+		// invoke broadcast
+		args := []interface{}{id}
+		if err := tarantool_utls.InvokeBroadcast("broadcast_user_notification", args, u.dbPool); err != nil {
+			fmt.Println("Broadcast Error : ", err)
+		}
+	}
+	return success, err
+}
+
+func (u *UserService) Delete(user_uuid uuid.UUID) (*UserDeleteResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("4"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.Delete(user_uuid)
+	return success, err
+}
+
+func (u *UserService) GetUserFormCreate() (*UserFormCreateResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("2"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.GetUserFormCreate()
+	return success, err
+}
+
+func (u *UserService) GetUserFormUpdate(user_uuid uuid.UUID) (*UserFormUpdateResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("3"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.GetUserFormUpdate(user_uuid)
+	return success, err
+}
+
+func (u *UserService) Update_Password(user_uuid uuid.UUID, usreq UserUpdatePasswordRequest) (*UserUpdatePasswordReponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.Update_Password(user_uuid, usreq)
+	if success != nil {
+		args := []interface{}{user_uuid}
+		if err := tarantool_utls.InvokeBroadcast("broadcast_user_notification", args, u.dbPool); err != nil {
+			fmt.Println("Broadcast Error : ", err)
+		}
+	}
+	return success, err
+}
+
+func (u *UserService) GetUserBasicInfo() (*UserBasicInfoResponse, *responses.ErrorResponse) {
+	if err := u.checkPermission("1"); err != nil {
+		return nil, err
+	}
+	success, err := u.userRepo.GetUserBasicInfo(u.userCtx.UserName)
+	if err != nil {
+		return nil, err
+	}
+	return success, nil
+}
